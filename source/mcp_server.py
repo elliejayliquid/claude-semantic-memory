@@ -1,15 +1,40 @@
-"""
-MCP Server for Claude's Semantic Memory System
-Exposes memory tools through the Model Context Protocol
-"""
-
 import json
 import logging
 import os
 import sys
+import subprocess
+import importlib.util
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+def check_and_install_dependencies():
+    """Check for required dependencies and install them if missing"""
+    # Mapping of import name to pip package name
+    dependencies = {
+        "mcp": "mcp",
+        "sentence_transformers": "sentence-transformers",
+        "numpy": "numpy"
+    }
+    
+    missing = []
+    for import_name, pip_name in dependencies.items():
+        if importlib.util.find_spec(import_name) is None:
+            missing.append(pip_name)
+    
+    if missing:
+        print(f"One-Click Install: Missing dependencies detected: {', '.join(missing)}", file=sys.stderr)
+        print("Installing now... (this may take a minute on the first run)", file=sys.stderr)
+        try:
+            subprocess.check_call([sys.executable, "-m", "pip", "install"] + missing)
+            print("Installation complete! Continuing...", file=sys.stderr)
+        except Exception as e:
+            print(f"Error: Failed to install dependencies: {e}", file=sys.stderr)
+            print("Please try running 'pip install mcp sentence-transformers numpy' manually.", file=sys.stderr)
+            sys.exit(1)
+
+# Run dependency check before anything else
+check_and_install_dependencies()
 
 from mcp.server.fastmcp import FastMCP
 from sentence_transformers import SentenceTransformer
