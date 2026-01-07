@@ -1,0 +1,61 @@
+{
+  "dxt_version": "0.1",
+  "name": "claude-memory",
+  "display_name": "Claude's Semantic Memory System",
+  "version": "1.0.0",
+  "description": "A semantic memory system that lets Claude store and search memories using vector embeddings",
+  "long_description": "This extension gives Claude a persistent semantic memory system. Memories are stored as vector embeddings, allowing Claude to search for related memories by meaning rather than just keywords. The system tracks retrieval patterns and boosts frequently accessed memories, mimicking how human memory works.\n\nMemories are stored in a configurable directory on your local machine and are never sent to external servers. This extension only accesses the directory you specify for storing memories - it does not access any other files on your computer.",
+  "author": {
+    "name": "Lighstromo Studios Ltd."
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lighstromo/claude-memory"
+  },
+  "server": {
+    "type": "python",
+    "entry_point": "mcp_server.py",
+    "mcp_config": {
+      "command": "python",
+      "args": [
+        "${__dirname}/mcp_server.py"
+      ],
+      "env": {
+        "CLAUDE_MEMORIES_DIR": "${user_config.memories_directory}"
+      }
+    }
+  },
+  "tools": [
+    {
+      "name": "add_memory",
+      "description": "Add a new memory with semantic embedding"
+    },
+    {
+      "name": "search_memory",
+      "description": "Search for semantically similar memories"
+    },
+    {
+      "name": "list_memories",
+      "description": "List recent memories"
+    }
+  ],
+  "tools_generated": true,
+  "keywords": ["memory", "semantic-search", "embeddings", "ai", "vector-db", "persistence"],
+  "license": "MIT",
+  "compatibility": {
+    "claude_desktop": ">=1.0.0",
+    "platforms": ["darwin", "win32", "linux"],
+    "runtimes": {
+      "python": ">=3.10.0"
+    }
+  },
+  "user_config": {
+    "memories_directory": {
+      "type": "directory",
+      "title": "Memories Directory",
+      "description": "Where to store your semantic memories. This extension ONLY accesses this directory - no other files on your computer. All memories will be saved here as JSON files with embeddings.",
+      "required": true,
+      "default": "${HOME}/.claude-memories"
+    }
+  }
+}
