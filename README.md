@@ -24,7 +24,7 @@ pip install mcp sentence-transformers numpy
 
 ### Install the Extension
 
-1. Download the latest `claude-memory-X.X.X.mcpb` file from [Releases](https://github.com/lighstromo/claude-memory/releases)
+1. Download the latest `claude-semantic-memory-X.X.X.mcpb` file from [Releases](https://github.com/elliejayliquid/claude-semantic-memory/tree/main/releases)
 2. Open Claude Desktop
 3. Go to Settings
 4. Drag and drop the `.mcpb` file into the Settings window
@@ -94,8 +94,8 @@ You can change this location at any time in Claude Desktop settings.
 
 ```bash
 # Clone the repository
-git clone https://github.com/lighstromo/claude-memory.git
-cd claude-memory
+git clone https://github.com/elliejayliquid/claude-semantic-memory.git
+cd claude-semantic-memory/source
 
 # Install dependencies
 pip install mcp sentence-transformers numpy
@@ -104,20 +104,10 @@ pip install mcp sentence-transformers numpy
 npm install -g @anthropic-ai/mcpb
 
 # Package the extension
-mcpb pack
+mcpb pack . claude-semantic-memory.mcpb
 ```
 
-This creates `claude-memory-X.X.X.mcpb` ready for installation!
-
-### Project Structure
-
-```
-claude-memory/
-├── mcp_server.py       # Main MCP server implementation
-├── manifest.json       # Extension metadata and configuration
-├── .mcpbignore        # Files to exclude from packaging
-└── README.md          # This file
-```
+This creates `claude-semantic-memory.mcpb` ready for installation!
 
 ## Troubleshooting
 
