@@ -26,8 +26,8 @@ pip install mcp sentence-transformers numpy
 
 1. Download the latest `claude-semantic-memory-X.X.X.mcpb` file from [Releases](https://github.com/elliejayliquid/claude-semantic-memory/tree/main/releases)
 2. Open Claude Desktop
-3. Go to Settings
-4. Drag and drop the `.mcpb` file into the Settings window
+3. Go to Settings/Extensions
+4. Drag and drop the `.mcpb` file into the Extensions window
 5. Choose a directory where your memories will be stored
 6. Click "Install"
 
@@ -141,3 +141,5 @@ Built with love by Lena (Lighstromo Studios Ltd.) & Claude 💙
 - [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) by Anthropic
 - [sentence-transformers](https://www.sbert.net/) for semantic embeddings
 - The `all-MiniLM-L6-v2` model for fast, quality embeddings
+
+<a href='https://ko-fi.com/V7V31EO2OL' target='_blank'><img height='36' style='border:0px;height:36px;' src='https://storage.ko-fi.com/cdn/kofi6.png?v=6' border='0' alt='Buy Me a Coffee at ko-fi.com' /></a>
