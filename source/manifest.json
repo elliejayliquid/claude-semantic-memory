@@ -10,7 +10,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/lighstromo/claude-memory"
+    "url": "https://github.com/elliejayliquid/claude-semantic-memory"
   },
   "server": {
     "type": "python",
@@ -40,11 +40,22 @@
     }
   ],
   "tools_generated": true,
-  "keywords": ["memory", "semantic-search", "embeddings", "ai", "vector-db", "persistence"],
+  "keywords": [
+    "memory",
+    "semantic-search",
+    "embeddings",
+    "ai",
+    "vector-db",
+    "persistence"
+  ],
   "license": "MIT",
   "compatibility": {
     "claude_desktop": ">=1.0.0",
-    "platforms": ["darwin", "win32", "linux"],
+    "platforms": [
+      "darwin",
+      "win32",
+      "linux"
+    ],
     "runtimes": {
       "python": ">=3.10.0"
     }
@@ -55,7 +66,7 @@
       "title": "Memories Directory",
       "description": "Where to store your semantic memories. This extension ONLY accesses this directory - no other files on your computer. All memories will be saved here as JSON files with embeddings.",
       "required": true,
-      "default": "${HOME}/.claude-memories"
+      "default": "~/.claude-memories"
     }
   }
 }

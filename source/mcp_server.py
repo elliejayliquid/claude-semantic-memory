@@ -28,7 +28,13 @@ mcp = FastMCP("claude-memory")
 
 # Get memories directory from environment or use default
 # This allows users to configure where their memories are stored
-MEMORIES_DIR = Path(os.environ.get('CLAUDE_MEMORIES_DIR', Path.home() / '.claude-memories'))
+raw_dir = os.environ.get('CLAUDE_MEMORIES_DIR')
+if raw_dir:
+    # Handle literal "${HOME}" or "~" if passed as a string or from UI
+    raw_dir = raw_dir.replace('${HOME}', str(Path.home()))
+    MEMORIES_DIR = Path(raw_dir).expanduser().resolve()
+else:
+    MEMORIES_DIR = Path.home() / '.claude-memories'
 MODEL_NAME = 'all-MiniLM-L6-v2'
 
 # Ensure memories directory exists

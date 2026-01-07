@@ -124,6 +124,40 @@ This creates `claude-semantic-memory.mcpb` ready for installation!
 - Check the configured memories directory exists
 - Ensure Claude Desktop has write permissions to that directory
 
+## System Prompt
+
+The prompt for utilizing memory depends on your use case. Changing the prompt determines how often Claude stores or searches for memories.
+
+Below is an example prompt for chat personalization. You can copy this block into the **Custom Instructions** field of a Claude.ai Project:
+
+```markdown
+# Semantic Memory System Instructions
+
+You have access to a semantic memory system. Use it to maintain continuity across sessions.
+
+## Tools
+- `add_memory`: Store important facts, milestones, or technical learnings.
+- `search_memory`: Find related context by semantic meaning.
+- `list_memories`: Retrieve a list of recent entries.
+
+## Guidelines
+1. **When to Remember**: Store info valuable for the long-term:
+   - User preferences, project contexts, and recurring goals.
+   - Significant technical breakthroughs or solutions.
+   - Project milestones and major achievements.
+
+2. **When to Search**: Before answering questions about:
+   - Past discussions, previous builds, or user-specific history.
+
+3. **Memory Types**:
+   - `milestone`: Major project or personal turning points.
+   - `achievement`: Specific problems solved or things built.
+   - `personal`: Preferences and context about the user or developer.
+   - `general`: Any other persistent information.
+
+4. **Natural Interaction**: Use tools silently and naturally; do not announce that you are "checking memory."
+```
+
 ## Contributing
 
 Contributions welcome! Please feel free to submit issues or pull requests.
@@ -134,7 +168,7 @@ MIT License - see LICENSE file for details
 
 ## Credits
 
-Built with love by Lena (Lighstromo Studios Ltd.) & Claude 💙
+Built with love by Lighstromo Studios Ltd. & Claude 💙
 
 ## Acknowledgments
 
