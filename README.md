@@ -21,6 +21,7 @@ pip install mcp sentence-transformers numpy
 ```
 
 **Note**: On first run, the extension will download the `all-MiniLM-L6-v2` embedding model (~90MB). This happens automatically but requires an internet connection.
+- **08.01.2026**: Now, if the user forgets to install the required packages, the server will install them automatically on the first run. Python is still a pre-req.
 
 ### Install the Extension
 
