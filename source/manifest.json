@@ -37,6 +37,10 @@
     {
       "name": "list_memories",
       "description": "List recent memories"
+    },
+    {
+      "name": "visualize_memories",
+      "description": "Launch the visual interstellar nebula dashboard for your memories"
     }
   ],
   "tools_generated": true,

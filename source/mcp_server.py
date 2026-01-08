@@ -4,6 +4,8 @@ import os
 import sys
 import subprocess
 import importlib.util
+import webbrowser
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -266,6 +268,74 @@ def list_memories(limit: int = 10) -> str:
         output_lines.append(f"  Tags: {tags_str}, Importance: {mem['importance']}/10, Type: {mem.get('type', 'general')}\n")
     
     return '\n'.join(output_lines)
+
+
+@mcp.tool()
+def visualize_memories() -> str:
+    """Export memories and launch the interstellar nebula visualization in your browser.
+    
+    This tool sets up the Semantic Nebula dashboard in your memories directory 
+    and opens it automatically.
+    """
+    logger.info("Initializing visualization...")
+    
+    # 1. Export Data
+    memories = load_all_memories()
+    export_data = []
+    for mem in memories:
+        export_data.append({
+            "id": mem["id"],
+            "text": mem["text"],
+            "tags": mem["tags"],
+            "importance": mem["importance"],
+            "retrieval_count": mem.get("retrieval_count", 0),
+            "date": mem["date"],
+            "embedding": mem["embedding"]
+        })
+    
+    # Save to user's memory directory as .js to bypass CORS
+    data_file = MEMORIES_DIR / "memories.js"
+    try:
+        with open(data_file, 'w', encoding='utf-8') as f:
+            f.write("var MEMORY_DATA = ")
+            json.dump(export_data, f, indent=2)
+            f.write(";")
+    except IOError as e:
+        logger.error(f"Failed to save memories.js: {e}")
+        return f"❌ Failed to export data: {str(e)}"
+
+    # 2. Setup HTML (copy from bundle to data dir)
+    # The source is in a 'visualizer' subfolder next to this script
+    script_dir = Path(__file__).parent
+    viz_src = script_dir / "visualizer" / "index.html"
+    viz_dest = MEMORIES_DIR / "index.html"
+    
+    try:
+        if viz_src.exists():
+            shutil.copy2(viz_src, viz_dest)
+            logger.info(f"Dashboard HTML copied to {viz_dest}")
+        else:
+            logger.warning(f"Visualizer source not found at {viz_src}")
+            # If we are running in dev mode, try parent/visualizer
+            alt_src = script_dir.parent / "visualizer" / "index.html"
+            if alt_src.exists():
+                shutil.copy2(alt_src, viz_dest)
+                logger.info(f"Dashboard HTML copied from alternative source: {alt_src}")
+            else:
+                return "❌ Could not find visualizer source files in the bundle."
+    except Exception as e:
+        logger.error(f"Failed to setup visualizer HTML: {e}")
+        return f"❌ Failed to setup dashboard: {str(e)}"
+
+    # 3. Launch Browser
+    viz_url = viz_dest.absolute().as_uri()
+    try:
+        webbrowser.open(viz_url)
+        logger.info(f"Browser opened to {viz_url}")
+        return f"✨ Nebula Visualization launched! Found {len(export_data)} memories.\nOpening: {viz_dest}"
+    except Exception as e:
+        logger.error(f"Failed to open browser: {e}")
+        return f"✓ Data updated. Please open this file manually to see the nebula:\n{viz_dest}"
 
 
 def main():

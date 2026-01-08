@@ -5,10 +5,11 @@ A persistent semantic memory system for Claude Desktop that uses vector embeddin
 ## Features
 
 - **Semantic Search**: Find related memories even when they don't share exact words
-- **Retrieval Tracking**: Frequently accessed memories get boosted in search results
+- **Immersive Visualization**: Explore your memories in the **Semantic Nebula**—a dynamic interstellar map of your thoughts
+- **Retrieval Tracking**: Frequently accessed memories get boosted in search results and pulse in the nebula
+- **Auto-Installer**: Completely "One-Click"—automatically handles Python dependencies on first run
 - **Local & Private**: All memories stored on your machine, never sent to external servers
-- **One-Click Install**: Packaged as a Claude Desktop Extension (.mcpb)
-- **Configurable Storage**: Choose where to store your memories
+- **Configurable Storage**: Choose where to store your memories with full path resolution
 
 ## Installation
 
@@ -20,8 +21,10 @@ A persistent semantic memory system for Claude Desktop that uses vector embeddin
 pip install mcp sentence-transformers numpy
 ```
 
-**Note**: On first run, the extension will download the `all-MiniLM-L6-v2` embedding model (~90MB). This happens automatically but requires an internet connection.
-- **08.01.2026**: Now, if the user forgets to install the required packages, the server will install them automatically on the first run. Python is still a pre-req.
+**Note**: On first run, the extension will download the `all-MiniLM-L6-v2` embedding model (~90MB). This happens automatically.
+
+> [!TIP]
+> **One-Click Ready**: If you have Python installed but forgot the libraries, the extension will now automatically detect and install missing dependencies (`mcp`, `numpy`, `sentence-transformers`) on its very first run!
 
 ### Install the Extension
 
@@ -32,10 +35,11 @@ pip install mcp sentence-transformers numpy
 5. Choose a directory where your memories will be stored
 6. Click "Install"
 
-That's it! Claude now has access to three new tools:
-- `add_memory` - Store new memories
-- `search_memory` - Find related memories semantically
-- `list_memories` - Browse recent memories
+That's it! Claude now has access to four powerful tools:
+- `add_memory` - Store new memories with semantic context
+- `search_memory` - Find related memories by meaning
+- `list_memories` - Browse your most recent entries
+- `visualize_memories` - Launch the **Semantic Nebula** in your browser
 
 ## Usage
 
@@ -43,18 +47,23 @@ Once installed, Claude will automatically use the memory system when appropriate
 
 - "Remember that I prefer Python over JavaScript"
 - "Search your memory for anything about robot projects"
+- "Visualize my memories for me" (Launches the nebula)
 - "What do you remember about our collaboration?"
 
 ## How It Works
 
-Memories are stored as JSON files with 384-dimensional vector embeddings generated using the [sentence-transformers](https://www.sbert.net/) library. When you search, the system:
+Memories are stored as JSON files with 384-dimensional vector embeddings generated using the [sentence-transformers](https://www.sbert.net/) library. 
 
-1. Converts your query into a vector embedding
-2. Calculates similarity scores with all stored memories
-3. Boosts scores for frequently accessed memories
-4. Returns the most relevant results
+### The Retrieval Loop
+1. **Embedding**: Converts your query into a vector in a 384-dimensional space.
+2. **Scoring**: Calculates similarity scores between your query and all stored memories.
+3. **Boosting**: Strengthens results for frequently accessed memories (mimicking human neurons!).
 
-The system mimics human memory by strengthening frequently retrieved memories!
+### The Semantic Nebula
+The visualization system uses a **D3-force physics engine** to map your thoughts:
+- **Constellations**: Similar memories are pulled together, forming natural topic clusters.
+- **Star Intensity**: Frequently retrieved memories glow brighter and pulse with light.
+- **Focus Beam**: Use the sidebar to find and "fly" directly to any memory in the void.
 
 ## Memory Format
 
@@ -140,6 +149,7 @@ You have access to a semantic memory system. Use it to maintain continuity acros
 - `add_memory`: Store important facts, milestones, or technical learnings.
 - `search_memory`: Find related context by semantic meaning.
 - `list_memories`: Retrieve a list of recent entries.
+- `visualize_memories`: Open the interstellar nebula dashboard.
 
 ## Guidelines
 1. **When to Remember**: Store info valuable for the long-term:
