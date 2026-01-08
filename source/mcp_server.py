@@ -123,7 +123,8 @@ def add_memory(
     text: str,
     tags: str = "",
     importance: int = 5,
-    memory_type: str = "general"
+    memory_type: str = "general",
+    date: str = None
 ) -> str:
     """Add a new memory to the semantic memory system.
     
@@ -132,6 +133,7 @@ def add_memory(
         tags: Comma-separated tags (e.g. "project,ai,important")
         importance: Importance rating from 1-10
         memory_type: Type of memory (general, achievement, milestone, etc)
+        date: Optional YYYY-MM-DD date (defaults to today)
     """
     logger.info(f"Adding memory: {text[:50]}...")
     
@@ -147,10 +149,12 @@ def add_memory(
     tag_list = [t.strip() for t in tags.split(',') if t.strip()]
     
     # Create memory object
+    memory_date = date if date else datetime.now().strftime("%Y-%m-%d")
+    
     memory = {
         "id": f"{memory_id:03d}",
         "text": text,
-        "date": datetime.now().strftime("%Y-%m-%d"),
+        "date": memory_date,
         "tags": tag_list,
         "type": memory_type,
         "importance": importance,
@@ -169,6 +173,61 @@ def add_memory(
     except IOError as e:
         logger.error(f"Failed to save memory: {e}")
         return f"❌ Failed to save memory: {str(e)}"
+
+
+@mcp.tool()
+def update_memory(
+    memory_id: str,
+    text: str = None,
+    tags: str = None,
+    importance: int = None,
+    memory_type: str = None,
+    date: str = None
+) -> str:
+    """Update an existing memory by its ID. Only provided fields will be changed.
+    
+    Args:
+        memory_id: The ID of the memory to update (e.g. "001")
+        text: New text for the memory
+        tags: New comma-separated tags
+        importance: New importance rating (1-10)
+        memory_type: New memory type
+        date: New YYYY-MM-DD date
+    """
+    logger.info(f"Updating memory: {memory_id}")
+    
+    filename = MEMORIES_DIR / f"memory_{memory_id}.json"
+    if not filename.exists():
+        return f"❌ Error: Memory #{memory_id} not found."
+    
+    try:
+        with open(filename, 'r', encoding='utf-8') as f:
+            memory = json.load(f)
+            
+        if text is not None:
+            memory["text"] = text
+            # Re-generate embedding if text changed
+            memory["embedding"] = model.encode(text).tolist()
+            
+        if tags is not None:
+            memory["tags"] = [t.strip() for t in tags.split(',') if t.strip()]
+            
+        if importance is not None:
+            memory["importance"] = max(1, min(10, importance))
+            
+        if memory_type is not None:
+            memory["type"] = memory_type
+            
+        if date is not None:
+            memory["date"] = date
+            
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump(memory, f, indent=2)
+            
+        return f"✓ Memory #{memory_id} updated successfully."
+    except Exception as e:
+        logger.error(f"Failed to update memory: {e}")
+        return f"❌ Failed to update memory: {str(e)}"
 
 
 @mcp.tool()

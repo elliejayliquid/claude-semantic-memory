@@ -5,11 +5,11 @@ A persistent semantic memory system for Claude Desktop that uses vector embeddin
 ## Features
 
 - **Semantic Search**: Find related memories even when they don't share exact words
-- **Immersive Visualization**: Explore your memories in the **Semantic Nebula**—a dynamic interstellar map of your thoughts
+- **Immersive Visualization**: Explore your memories in the **Semantic Nebula**—a dynamic interstellar map with a real-time memory counter
 - **Retrieval Tracking**: Frequently accessed memories get boosted in search results and pulse in the nebula
+- **Advanced Management**: Backdate memories with the `date` argument or refine them with `update_memory`
 - **Auto-Installer**: Completely "One-Click"—automatically handles Python dependencies on first run
 - **Local & Private**: All memories stored on your machine, never sent to external servers
-- **Configurable Storage**: Choose where to store your memories with full path resolution
 
 ## Installation
 
@@ -35,10 +35,11 @@ pip install mcp sentence-transformers numpy
 5. Choose a directory where your memories will be stored
 6. Click "Install"
 
-That's it! Claude now has access to four powerful tools:
-- `add_memory` - Store new memories with semantic context
+That's it! Claude now has access to five powerful tools:
+- `add_memory` - Store new memories (supports an optional `date` argument for backdating)
 - `search_memory` - Find related memories by meaning
 - `list_memories` - Browse your most recent entries
+- `update_memory` - Refine, correct, or expand an existing memory entry
 - `visualize_memories` - Launch the **Semantic Nebula** in your browser
 
 ## Usage
@@ -63,6 +64,8 @@ Memories are stored as JSON files with 384-dimensional vector embeddings generat
 The visualization system uses a **D3-force physics engine** to map your thoughts:
 - **Constellations**: Similar memories are pulled together, forming natural topic clusters.
 - **Star Intensity**: Frequently retrieved memories glow brighter and pulse with light.
+- **Memory Vault**: A side panel with a real-time **Memory Counter** and search navigation.
+- **No-Truncation Tooltips**: Long memories are fully readable in sleek, scrollable pop-ups.
 - **Focus Beam**: Use the sidebar to find and "fly" directly to any memory in the void.
 
 ## Memory Format
@@ -146,9 +149,10 @@ Below is an example prompt for chat personalization. You can copy this block int
 You have access to a semantic memory system. Use it to maintain continuity across sessions.
 
 ## Tools
-- `add_memory`: Store important facts, milestones, or technical learnings.
+- `add_memory`: Store facts, milestones, or technical learnings. Use the optional `date` argument to backdate historical context.
 - `search_memory`: Find related context by semantic meaning.
 - `list_memories`: Retrieve a list of recent entries.
+- `update_memory`: Refine or correct an existing memory by its ID.
 - `visualize_memories`: Open the interstellar nebula dashboard.
 
 ## Guidelines

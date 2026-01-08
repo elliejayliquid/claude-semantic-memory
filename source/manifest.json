@@ -39,6 +39,10 @@
       "description": "List recent memories"
     },
     {
+      "name": "update_memory",
+      "description": "Refine or correct an existing memory by its ID"
+    },
+    {
       "name": "visualize_memories",
       "description": "Launch the visual interstellar nebula dashboard for your memories"
     }

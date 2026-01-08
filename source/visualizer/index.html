@@ -234,7 +234,9 @@
             font-size: 14px;
             pointer-events: none;
             display: none;
-            max-width: 320px;
+            max-width: 400px;
+            max-height: 60vh;
+            overflow-y: auto;
             box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.5);
             z-index: 100;
         }
@@ -308,7 +310,7 @@
     <!-- Navigation Sidebar -->
     <div id="sidebar">
         <div class="sidebar-header">
-            <h2>Memory Vault</h2>
+            <h2 id="vault-title">Memory Vault</h2>
             <input type="text" id="search-input" placeholder="Search memories..." />
         </div>
         <div class="memory-list" id="memory-list">
@@ -359,6 +361,7 @@
         function populateSidebar(memories) {
             const list = document.getElementById('memory-list');
             const search = document.getElementById('search-input');
+            const title = document.getElementById('vault-title');
 
             const refreshList = (filterText = "") => {
                 list.innerHTML = "";
@@ -366,6 +369,8 @@
                     m.text.toLowerCase().includes(filterText.toLowerCase()) ||
                     m.tags.some(t => t.toLowerCase().includes(filterText.toLowerCase()))
                 );
+
+                title.innerText = `Memory Vault: ${filtered.length}`;
 
                 filtered.sort((a, b) => new Date(b.date) - new Date(a.date)).forEach(m => {
                     const item = document.createElement('div');
@@ -498,7 +503,7 @@
                 .on("mouseover", (e, d) => {
                     tooltip.style("display", "block")
                         .html(`
-                            <h4>${d.raw.text.substring(0, 100)}${d.raw.text.length > 100 ? '...' : ''}</h4>
+                            <h4>${d.raw.text}</h4>
                             <div>${d.raw.tags.map(t => `<span class="tag">${t}</span>`).join('')}</div>
                             <div style="margin-top:10px; font-size:12px; color:#aaa; display:flex; justify-content:space-between;">
                                 <span>Level: ${d.importance}/10</span>
