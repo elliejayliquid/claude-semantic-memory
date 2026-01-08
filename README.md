@@ -188,7 +188,7 @@ MIT License - see LICENSE file for details
 
 ## Credits
 
-Built with love by Lighstromo Studios Ltd. & Claude 💙
+Built with love by Lighstromo Studios Ltd., Claude & Gemini 💙
 
 ## Acknowledgments
 
