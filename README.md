@@ -12,8 +12,8 @@ A persistent semantic memory system for Claude Desktop that uses vector embeddin
 - **Local & Private**: All memories stored on your machine, never sent to external servers
 
 <div class="container", align="center">
-  <img src="examples/visualize_memories.PNG" width="800" alt="Description of image"/>
-  <img src="examples/add_memory.PNG" width="800" alt="Description of image"/>
+  <img src="examples/visualize_memories.PNG" width="800" alt="Semantic Nebula Visualizer"/>
+  <img src="examples/add_memory.PNG" width="800" alt="Adding memory example"/>
 </div>
 
 ## Installation
@@ -180,6 +180,9 @@ You have access to a semantic memory system. Use it to maintain continuity acros
 
 5. **Natural Interaction**: Use tools silently and naturally; do not announce that you are "checking memory." Your relationship with this person should feel continuous and warm, not like you're constantly consulting a database.
 ```
+<div class="container", align="center">
+  <img src="examples/get_context_summary.PNG" width="800" alt="Fresh convo example"/>
+</div>
 
 ## Contributing
 
