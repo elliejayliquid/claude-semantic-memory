@@ -191,12 +191,17 @@ MIT License - see LICENSE file for details
 
 ## Credits
 
-Built with love by Lighstromo Studios Ltd. & Claude 💙
+Built with love by Lighstromo Studios Ltd., Gemini & Claude 💙
 
 ## Acknowledgments
 
 - [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) by Anthropic
 - [sentence-transformers](https://www.sbert.net/) for semantic embeddings
 - The `all-MiniLM-L6-v2` model for fast, quality embeddings
+- [Antigravity](https://antigravity.google/) by Google
 
-<a href='https://ko-fi.com/V7V31EO2OL' target='_blank'><img height='36' style='border:0px;height:36px;' src='https://storage.ko-fi.com/cdn/kofi6.png?v=6' border='0' alt='Buy Me a Coffee at ko-fi.com' /></a>
+##
+
+<div class="container", align="center">
+  <a href='https://ko-fi.com/V7V31EO2OL' target='_blank'><img height='36' style='border:0px;height:36px;' src='https://storage.ko-fi.com/cdn/kofi6.png?v=6' border='0' alt='Buy Me a Coffee at ko-fi.com' /></a>
+</div>
