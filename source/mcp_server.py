@@ -88,13 +88,15 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
 
 
-def load_all_memories() -> list[dict[str, Any]]:
+def load_all_memories(include_embeddings: bool = True) -> list[dict[str, Any]]:
     """Load all memory files"""
     memories = []
     for filepath in MEMORIES_DIR.glob("memory_*.json"):
         try:
             with open(filepath, 'r', encoding='utf-8') as f:
                 memory = json.load(f)
+                if not include_embeddings and "embedding" in memory:
+                    del memory["embedding"]
                 memory['_filepath'] = str(filepath)
                 memories.append(memory)
         except (json.JSONDecodeError, IOError) as e:
@@ -311,7 +313,7 @@ def list_memories(limit: int = 10) -> str:
     # Validate limit
     limit = max(1, min(50, limit))
     
-    memories = load_all_memories()
+    memories = load_all_memories(include_embeddings=False)
     
     if not memories:
         return "No memories stored yet. Use add_memory to create your first memory!"
@@ -327,6 +329,43 @@ def list_memories(limit: int = 10) -> str:
         output_lines.append(f"  Tags: {tags_str}, Importance: {mem['importance']}/10, Type: {mem.get('type', 'general')}\n")
     
     return '\n'.join(output_lines)
+
+
+@mcp.tool()
+def get_context_summary() -> str:
+    """Get a curated summary of memories for session context.
+    
+    Returns the 5 most recent memories and 5 highest-importance memories 
+    to provide the LLM with a 'Smart Context' of the user's history.
+    """
+    logger.info("Generating context summary...")
+    
+    memories = load_all_memories(include_embeddings=False)
+    if not memories:
+        return "No memories found. Start by adding some with add_memory!"
+    
+    # 1. Get 5 most recent
+    recent = sorted(memories, key=lambda m: m.get('date', ''), reverse=True)[:5]
+    
+    # 2. Get 5 most important (excluding those already in recent)
+    recent_ids = {m['id'] for m in recent}
+    important = [m for m in memories if m['id'] not in recent_ids]
+    important = sorted(important, key=lambda m: m.get('importance', 0), reverse=True)[:5]
+    
+    output = ["### Memory Context Summary\n"]
+    
+    output.append("#### Recent History (Continuity)")
+    for m in recent:
+        output.append(f"- [{m['id']}] {m['date']}: {m['text'][:120]}...")
+        
+    if important:
+        output.append("\n#### Core Context (High Importance)")
+        for m in important:
+            output.append(f"- [{m['id']}] {m['date']}: {m['text'][:120]}...")
+            
+    output.append("\n*Tip: Use search_memory if you need to dig deeper into specific topics.*")
+    
+    return '\n'.join(output)
 
 
 @mcp.tool()

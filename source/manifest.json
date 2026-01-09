@@ -2,7 +2,7 @@
   "dxt_version": "0.1",
   "name": "claude-memory",
   "display_name": "Claude's Semantic Memory System",
-  "version": "1.0.0",
+  "version": "1.0.3",
   "description": "A semantic memory system that lets Claude store and search memories using vector embeddings",
   "long_description": "This extension gives Claude a persistent semantic memory system. Memories are stored as vector embeddings, allowing Claude to search for related memories by meaning rather than just keywords. The system tracks retrieval patterns and boosts frequently accessed memories, mimicking how human memory works.\n\nMemories are stored in a configurable directory on your local machine and are never sent to external servers. This extension only accesses the directory you specify for storing memories - it does not access any other files on your computer.",
   "author": {
@@ -37,6 +37,10 @@
     {
       "name": "list_memories",
       "description": "List recent memories"
+    },
+    {
+      "name": "get_context_summary",
+      "description": "Retrieve a 'Smart Context' of recent and high-importance memories"
     },
     {
       "name": "update_memory",
