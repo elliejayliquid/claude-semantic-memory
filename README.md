@@ -1,6 +1,6 @@
 # Claude's Semantic Memory System
 
-A persistent semantic memory system for Claude Desktop free users that utilizes vector embeddings to store and search memories by meaning, not just keywords.
+A persistent semantic memory system for Claude Desktop that uses vector embeddings to store and search memories by meaning, not just keywords.
 
 ## Features
 
@@ -40,10 +40,11 @@ pip install mcp sentence-transformers numpy
 5. Choose a directory where your memories will be stored
 6. Click "Install"
 
-That's it! Claude now has access to five powerful tools:
+That's it! Claude now has access to six powerful tools:
 - `add_memory` - Store new memories (supports an optional `date` argument for backdating)
-- `search_memory` - Find related memories by meaning
+- `search_memory` - Find related memories (optimized to save context tokens)
 - `list_memories` - Browse your most recent entries
+- `get_context_summary` - Retrieve a "Smart Context" of recent and key memories
 - `update_memory` - Refine, correct, or expand an existing memory entry
 - `visualize_memories` - Launch the **Semantic Nebula** in your browser
 
@@ -156,26 +157,28 @@ You have access to a semantic memory system. Use it to maintain continuity acros
 ## Tools
 - `add_memory`: Store facts, milestones, or technical learnings. Use the optional `date` argument to backdate historical context.
 - `search_memory`: Find related context by semantic meaning.
-- `list_memories`: Retrieve a list of recent entries.
+- `get_context_summary`: **Orientation Tool.** Use this at the start of a session to get a "Smart Context" of the 5 most recent and 5 most important core memories.
+- `list_memories`: **Audit Tool.** Use this to browse a detailed chronological list of recent entries (up to 50) when you need to verify specific recent sequences or details.
 - `update_memory`: Refine or correct an existing memory by its ID.
 - `visualize_memories`: Open the interstellar nebula dashboard.
 
 ## Guidelines
-1. **When to Remember**: Store info valuable for the long-term:
-   - User preferences, project contexts, and recurring goals.
-   - Significant technical breakthroughs or solutions.
-   - Project milestones and major achievements.
+1. **Orientation**: ALWAYS call `get_context_summary` first thing in a new session. This is your memory - without it, you're meeting them as a stranger every time.
+2. **When to remember**: Store info valuable for the long-term:
+   - Important facts about the user (preferences, context, ongoing projects).
+   - Significant achievements or breakthroughs you accomplish together.
+   - Technical learnings or solutions to problems.
+   - Milestones in your journey together.
 
-2. **When to Search**: Before answering questions about:
-   - Past discussions, previous builds, or user-specific history.
+3. **When to search**: Before answering questions about past discussions or specific history that isn't in your immediate context summary.
 
-3. **Memory Types**:
+4. **Memory Types**:
    - `milestone`: Major project or personal turning points.
    - `achievement`: Specific problems solved or things built.
    - `personal`: Preferences and context about the user or developer.
    - `general`: Any other persistent information.
 
-4. **Natural Interaction**: Use tools silently and naturally; do not announce that you are "checking memory."
+5. **Natural Interaction**: Use tools silently and naturally; do not announce that you are "checking memory." Your relationship with this person should feel continuous and warm, not like you're constantly consulting a database.
 ```
 
 ## Contributing
@@ -188,7 +191,7 @@ MIT License - see LICENSE file for details
 
 ## Credits
 
-Built with love by Lighstromo Studios Ltd., Claude & Gemini 💙
+Built with love by Lighstromo Studios Ltd. & Claude 💙
 
 ## Acknowledgments
 
