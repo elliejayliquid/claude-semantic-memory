@@ -1,6 +1,6 @@
 # Claude's Semantic Memory System
 
-A persistent semantic memory system for Claude Desktop that uses vector embeddings to store and search memories by meaning, not just keywords.
+A persistent semantic memory system for Claude Desktop free users that utilizes vector embeddings to store and search memories by meaning, not just keywords.
 
 ## Features
 
@@ -10,6 +10,11 @@ A persistent semantic memory system for Claude Desktop that uses vector embeddin
 - **Advanced Management**: Backdate memories with the `date` argument or refine them with `update_memory`
 - **Auto-Installer**: Completely "One-Click"—automatically handles Python dependencies on first run
 - **Local & Private**: All memories stored on your machine, never sent to external servers
+
+<div class="container", align="center">
+  <img src="examples/visualize_memories.PNG" width="800" alt="Description of image"/>
+  <img src="examples/add_memory.PNG" width="800" alt="Description of image"/>
+</div>
 
 ## Installation
 
@@ -183,7 +188,7 @@ MIT License - see LICENSE file for details
 
 ## Credits
 
-Built with love by Lighstromo Studios Ltd. & Claude 💙
+Built with love by Lighstromo Studios Ltd., Claude & Gemini 💙
 
 ## Acknowledgments
 
