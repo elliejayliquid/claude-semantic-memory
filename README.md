@@ -1,5 +1,9 @@
 # Claude's Semantic Memory System
 
+Recent updates:
+
+- 02.02.2026 - Improved the search algorithm to better handle backdated memories and boost based on importance and 'tags' inclusion (v.1.0.4)
+
 A persistent semantic memory system for Claude Desktop that uses vector embeddings to store and search memories by meaning, not just keywords.
 
 ## Features
@@ -41,6 +45,7 @@ pip install mcp sentence-transformers numpy
 6. Click "Install"
 
 That's it! Claude now has access to six powerful tools:
+
 - `add_memory` - Store new memories (supports an optional `date` argument for backdating)
 - `search_memory` - Find related memories (optimized to save context tokens)
 - `list_memories` - Browse your most recent entries
@@ -59,15 +64,18 @@ Once installed, Claude will automatically use the memory system when appropriate
 
 ## How It Works
 
-Memories are stored as JSON files with 384-dimensional vector embeddings generated using the [sentence-transformers](https://www.sbert.net/) library. 
+Memories are stored as JSON files with 384-dimensional vector embeddings generated using the [sentence-transformers](https://www.sbert.net/) library.
 
 ### The Retrieval Loop
+
 1. **Embedding**: Converts your query into a vector in a 384-dimensional space.
 2. **Scoring**: Calculates similarity scores between your query and all stored memories.
-3. **Boosting**: Strengthens results for frequently accessed memories (mimicking human neurons!).
+3. **Boosting**: Strengthens results for frequently accessed memories (mimicking human neurons!) + boost based on importance and 'tags' inclusion.
 
 ### The Semantic Nebula
+
 The visualization system uses a **D3-force physics engine** to map your thoughts:
+
 - **Constellations**: Similar memories are pulled together, forming natural topic clusters.
 - **Star Intensity**: Frequently retrieved memories glow brighter and pulse with light.
 - **Memory Vault**: A side panel with a real-time **Memory Counter** and search navigation.
@@ -131,15 +139,18 @@ This creates `claude-semantic-memory.mcpb` ready for installation!
 ## Troubleshooting
 
 **Extension won't install**
+
 - Ensure Python 3.10+ is installed: `python --version`
 - Install required packages: `pip install mcp sentence-transformers numpy`
 
 **Model download fails**
+
 - Check internet connection
 - The model is downloaded from HuggingFace on first run
 - Look for logs in Claude Desktop's extension logs
 
 **Memories not persisting**
+
 - Check the configured memories directory exists
 - Ensure Claude Desktop has write permissions to that directory
 
@@ -180,6 +191,7 @@ You have access to a semantic memory system. Use it to maintain continuity acros
 
 5. **Natural Interaction**: Use tools silently and naturally; do not announce that you are "checking memory." Your relationship with this person should feel continuous and warm, not like you're constantly consulting a database.
 ```
+
 <div class="container", align="center">
   <img src="examples/get_context_summary.PNG" width="800" alt="Fresh convo example"/>
 </div>
