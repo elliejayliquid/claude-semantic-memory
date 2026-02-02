@@ -234,70 +234,98 @@ def update_memory(
 
 @mcp.tool()
 def search_memory(
-    query: str,
-    top_k: int = 3
+        query: str,
+        top_k: int = 3
 ) -> str:
-    """Search for semantically similar memories.
-    
-    Args:
-        query: What to search for
-        top_k: Number of results to return (default 3, max 10)
-    """
+    """Search for semantically similar memories using vectorized operations."""
     logger.info(f"Searching for: {query}")
-    
+
     # Validate top_k
     top_k = max(1, min(10, top_k))
-    
-    # Generate query embedding
-    query_embedding = model.encode(query)
-    
+
     # Load all memories
     memories = load_all_memories()
-    
     if not memories:
         return "No memories found in the system yet. Use add_memory to create your first memory!"
-    
-    # Calculate similarities
-    results = []
-    for memory in memories:
-        memory_embedding = np.array(memory['embedding'])
-        base_similarity = cosine_similarity(query_embedding, memory_embedding)
-        
-        # Boost based on retrieval count
-        retrieval_count = memory.get('retrieval_count', 0)
-        boosted_similarity = base_similarity + min(retrieval_count * 0.01, 0.05)
-        
-        results.append({
-            'memory': memory,
-            'similarity': base_similarity,
-            'boosted_similarity': boosted_similarity
-        })
-    
-    # Sort by boosted similarity
-    results.sort(key=lambda x: x['boosted_similarity'], reverse=True)
-    top_results = results[:top_k]
-    
-    # Update retrieval tracking
-    for result in top_results:
-        update_memory_retrieval(result['memory'])
-    
-    logger.info(f"Found {len(top_results)} results")
-    
-    # Format output
-    output_lines = [f"Found {len(memories)} total memories, showing top {len(top_results)}:\n"]
-    
-    for i, result in enumerate(top_results, 1):
-        mem = result['memory']
-        sim = result['boosted_similarity']
-        boost = sim - result['similarity']
-        
-        boost_str = f" (+{boost:.3f} boost)" if boost > 0 else ""
-        
-        output_lines.append(f"{i}. [{mem['id']}] Similarity: {sim:.3f}{boost_str}")
+
+    # --- PHASE 1: PREPARATION (Vectorization) ---
+
+    # 1. Stack all memory embeddings into a single 2D matrix (Fast!)
+    # Shape: (Num_Memories, 384)
+    memory_matrix = np.array([m['embedding'] for m in memories])
+
+    # 2. Normalize the matrix for Cosine Similarity
+    # This creates a matrix where every vector has length 1
+    norm = np.linalg.norm(memory_matrix, axis=1, keepdims=True)
+    # Avoid division by zero if a memory has a zero vector (unlikely but safe)
+    norm[norm == 0] = 1
+    normalized_matrix = memory_matrix / norm
+
+    # 3. Prepare the Query Vector
+    query_embedding = model.encode(query)
+    query_norm = np.linalg.norm(query_embedding)
+    if query_norm > 0:
+        normalized_query = query_embedding / query_norm
+    else:
+        normalized_query = query_embedding
+
+    # --- PHASE 2: THE "100x FASTER" MATH ---
+
+    # Calculate ALL base similarities in ONE operation
+    # (Dot product of the matrix vs the query vector)
+    base_similarities = np.dot(normalized_matrix, normalized_query)
+
+    # --- PHASE 3: VECTORIZED BOOSTING ---
+
+    # 1. Retrieval Boost: Extract counts into an array and apply logic
+    retrieval_counts = np.array([m.get('retrieval_count', 0) for m in memories])
+    # Apply logic: min(count * 0.01, 0.05)
+    retrieval_boosts = np.minimum(retrieval_counts * 0.01, 0.05)
+
+    # 2. Importance Boost: Extract importance into an array
+    importances = np.array([m.get('importance', 5) for m in memories])
+    importance_boosts = importances * 0.002
+
+    # 3. Tag Matching: (List comprehension is fast enough for boolean checks)
+    query_terms = set(query.lower().split())
+    tag_boosts = np.array([
+        0.03 if not query_terms.isdisjoint(set(t.lower() for t in m.get('tags', [])))
+        else 0.0
+        for m in memories
+    ])
+
+    # --- PHASE 4: FINAL SCORE & SORTING ---
+
+    # Add everything together (numpy handles element-wise addition automatically)
+    final_scores = base_similarities + retrieval_boosts + importance_boosts + tag_boosts
+
+    # Get the indices of the top_k scores
+    # argsort gives ascending order, so we take the last k elements and reverse them
+    top_indices = np.argsort(final_scores)[-top_k:][::-1]
+
+    # --- PHASE 5: FORMAT OUTPUT ---
+
+    logger.info(f"Found {len(top_indices)} results")
+    output_lines = [f"Found {len(memories)} total memories, showing top {len(top_indices)}:\n"]
+
+    for i, idx in enumerate(top_indices, 1):
+        mem = memories[idx]
+        sim = base_similarities[idx]
+        final = final_scores[idx]
+
+        # Calculate the total boost applied for display
+        total_boost = final - sim
+        boost_str = f" (+{total_boost:.3f} boost)" if total_boost > 0 else ""
+
+        # Update retrieval count for the winners
+        update_memory_retrieval(mem)
+
+        output_lines.append(f"{i}. [{mem['id']}] Similarity: {final:.3f}{boost_str}")
         output_lines.append(f"   {mem['text']}")
         output_lines.append(f"   Tags: {', '.join(mem['tags']) if mem['tags'] else 'none'}")
-        output_lines.append(f"   Importance: {mem['importance']}/10, Retrieved: {mem.get('retrieval_count', 0)} times\n")
-    
+        output_lines.append(
+            f"   Importance: {mem['importance']}/10, Retrieved: {mem.get('retrieval_count', 0)} times\n")
+
     return '\n'.join(output_lines)
 
 
