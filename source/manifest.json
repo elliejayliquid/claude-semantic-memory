@@ -2,7 +2,7 @@
   "dxt_version": "0.1",
   "name": "claude-memory",
   "display_name": "Claude's Semantic Memory System",
-  "version": "1.0.3",
+  "version": "1.1.0",
   "description": "A semantic memory system that lets Claude store and search memories using vector embeddings",
   "long_description": "This extension gives Claude a persistent semantic memory system. Memories are stored as vector embeddings, allowing Claude to search for related memories by meaning rather than just keywords. The system tracks retrieval patterns and boosts frequently accessed memories, mimicking how human memory works.\n\nMemories are stored in a configurable directory on your local machine and are never sent to external servers. This extension only accesses the directory you specify for storing memories - it does not access any other files on your computer.",
   "author": {
@@ -49,6 +49,26 @@
     {
       "name": "visualize_memories",
       "description": "Launch the visual interstellar nebula dashboard for your memories"
+    },
+    {
+      "name": "write_journal",
+      "description": "Write a narrative journal entry with YAML frontmatter and companion memory"
+    },
+    {
+      "name": "read_journal_latest",
+      "description": "Read the latest curated journal entries for session orientation"
+    },
+    {
+      "name": "search_journal",
+      "description": "Search journal entries by semantic similarity"
+    },
+    {
+      "name": "list_journal_entries",
+      "description": "List all journal entries with metadata"
+    },
+    {
+      "name": "pin_journal_entry",
+      "description": "Pin or unpin a journal entry for the latest view"
     }
   ],
   "tools_generated": true,
@@ -58,7 +78,8 @@
     "embeddings",
     "ai",
     "vector-db",
-    "persistence"
+    "persistence",
+    "journal"
   ],
   "license": "MIT",
   "compatibility": {

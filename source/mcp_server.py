@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 import sys
 import subprocess
 import importlib.util
@@ -16,7 +17,8 @@ def check_and_install_dependencies():
     dependencies = {
         "mcp": "mcp",
         "sentence_transformers": "sentence-transformers",
-        "numpy": "numpy"
+        "numpy": "numpy",
+        "yaml": "pyyaml"
     }
     
     missing = []
@@ -41,6 +43,7 @@ check_and_install_dependencies()
 from mcp.server.fastmcp import FastMCP
 from sentence_transformers import SentenceTransformer
 import numpy as np
+import yaml
 
 # Configure logging to stderr (NOT stdout!)
 logging.basicConfig(
@@ -67,6 +70,14 @@ MODEL_NAME = 'all-MiniLM-L6-v2'
 # Ensure memories directory exists
 MEMORIES_DIR.mkdir(parents=True, exist_ok=True)
 logger.info(f"Using memories directory: {MEMORIES_DIR}")
+
+# Journal subsystem paths (directories created lazily on first write)
+JOURNAL_DIR = MEMORIES_DIR / "journal"
+JOURNAL_ENTRIES_DIR = JOURNAL_DIR / "entries"
+JOURNAL_CONFIG_PATH = JOURNAL_DIR / "config.json"
+JOURNAL_LATEST_PATH = JOURNAL_DIR / "latest.md"
+DEFAULT_LATEST_COUNT = 3
+DEFAULT_MAX_PINS = 2
 
 # Load embedding model
 logger.info("Loading embedding model...")
@@ -118,6 +129,171 @@ def update_memory_retrieval(memory: dict[str, Any]) -> None:
             json.dump(save_memory, f, indent=2)
     except IOError as e:
         logger.error(f"Failed to update memory {filepath}: {e}")
+
+
+# ============================================================
+# Journal Utility Functions
+# ============================================================
+
+def _ensure_journal_dirs():
+    """Create journal directories if they don't exist (lazy initialization)."""
+    JOURNAL_ENTRIES_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _load_journal_config() -> dict:
+    """Load journal config with defaults."""
+    config = {
+        "latest_count": DEFAULT_LATEST_COUNT,
+        "max_pins": DEFAULT_MAX_PINS
+    }
+    if JOURNAL_CONFIG_PATH.exists():
+        try:
+            with open(JOURNAL_CONFIG_PATH, 'r', encoding='utf-8') as f:
+                user_config = json.load(f)
+                config.update(user_config)
+        except (json.JSONDecodeError, IOError) as e:
+            logger.warning(f"Failed to load journal config: {e}")
+    return config
+
+
+def _generate_slug(title: str, max_length: int = 50) -> str:
+    """Generate a filesystem-safe slug from a title."""
+    slug = title.lower()
+    # Remove Windows-unsafe characters: < > : " / \ | ? *
+    slug = re.sub(r'[<>:"/\\|?*]', '', slug)
+    # Replace non-alphanumeric sequences with hyphens
+    slug = re.sub(r'[^a-z0-9]+', '-', slug)
+    # Strip leading/trailing hyphens
+    slug = slug.strip('-')
+    # Truncate to max_length
+    if len(slug) > max_length:
+        slug = slug[:max_length].rstrip('-')
+    return slug or 'untitled'
+
+
+def _resolve_entry_path(date_str: str, slug: str) -> Path:
+    """Find a non-colliding entry filename."""
+    base = f"{date_str}_{slug}.md"
+    path = JOURNAL_ENTRIES_DIR / base
+    if not path.exists():
+        return path
+    counter = 2
+    while True:
+        path = JOURNAL_ENTRIES_DIR / f"{date_str}_{slug}-{counter}.md"
+        if not path.exists():
+            return path
+        counter += 1
+
+
+def _parse_frontmatter(content: str) -> tuple[dict, str]:
+    """Parse YAML frontmatter from a markdown file.
+    Returns (metadata_dict, body_text).
+    """
+    content = content.strip()
+    if not content.startswith('---'):
+        return {}, content
+
+    # Find the closing ---
+    end_idx = content.find('---', 3)
+    if end_idx == -1:
+        return {}, content
+
+    yaml_str = content[3:end_idx].strip()
+    body = content[end_idx + 3:].strip()
+
+    try:
+        metadata = yaml.safe_load(yaml_str) or {}
+    except yaml.YAMLError as e:
+        logger.error(f"Failed to parse YAML frontmatter: {e}")
+        metadata = {}
+
+    return metadata, body
+
+
+def _build_frontmatter(metadata: dict) -> str:
+    """Build YAML frontmatter string from a dict."""
+    yaml_str = yaml.dump(
+        metadata, default_flow_style=False,
+        allow_unicode=True, sort_keys=False
+    ).strip()
+    return f"---\n{yaml_str}\n---"
+
+
+def _compose_latest(count: int = None) -> str:
+    """Compose the latest journal entries.
+
+    Pinned entries first (chronologically), then most recent unpinned,
+    up to `count` total entries.
+    """
+    config = _load_journal_config()
+    if count is None:
+        count = config['latest_count']
+    max_pins = config['max_pins']
+
+    if not JOURNAL_ENTRIES_DIR.exists():
+        return "No journal entries yet. Use write_journal to create your first entry."
+
+    # Parse all entries
+    entries = []
+    for filepath in JOURNAL_ENTRIES_DIR.glob("*.md"):
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                raw = f.read()
+            metadata, body = _parse_frontmatter(raw)
+            metadata['_filepath'] = filepath
+            metadata['_body'] = body
+            metadata['_filename'] = filepath.name
+            entries.append(metadata)
+        except IOError as e:
+            logger.error(f"Failed to read journal entry {filepath}: {e}")
+
+    if not entries:
+        return "No journal entries yet. Use write_journal to create your first entry."
+
+    # Sort all by date descending
+    entries.sort(key=lambda e: str(e.get('date', '')), reverse=True)
+
+    # Separate pinned and unpinned
+    pinned = [e for e in entries if e.get('pinned', False)][:max_pins]
+    pinned.sort(key=lambda e: str(e.get('date', '')))  # Pinned: chronological
+
+    unpinned = [e for e in entries if not e.get('pinned', False)]
+    remaining_slots = max(0, count - len(pinned))
+    recent_unpinned = unpinned[:remaining_slots]
+
+    # Compose output
+    sections = ["# Journal — Latest Entries\n"]
+
+    if pinned:
+        sections.append("## Pinned\n")
+        for e in pinned:
+            sections.append(f"### {e.get('title', 'Untitled')} ({e.get('date', 'unknown')})")
+            sections.append(f"*By {e.get('author', 'Unknown')}*\n")
+            sections.append(e.get('_body', ''))
+            sections.append("\n---\n")
+
+    if recent_unpinned:
+        if pinned:
+            sections.append("## Recent\n")
+        for e in recent_unpinned:
+            sections.append(f"### {e.get('title', 'Untitled')} ({e.get('date', 'unknown')})")
+            sections.append(f"*By {e.get('author', 'Unknown')}*\n")
+            sections.append(e.get('_body', ''))
+            sections.append("\n---\n")
+
+    return '\n'.join(sections)
+
+
+def _regenerate_latest_md():
+    """Regenerate the latest.md file from current entries."""
+    _ensure_journal_dirs()
+    content = _compose_latest()
+    try:
+        with open(JOURNAL_LATEST_PATH, 'w', encoding='utf-8') as f:
+            f.write(content)
+        logger.info("Regenerated latest.md")
+    except IOError as e:
+        logger.error(f"Failed to regenerate latest.md: {e}")
 
 
 @mcp.tool()
@@ -232,6 +408,67 @@ def update_memory(
         return f"❌ Failed to update memory: {str(e)}"
 
 
+def _search_memories_core(
+    query: str,
+    memories: list[dict[str, Any]],
+    top_k: int
+) -> list[tuple[int, float, float, float]]:
+    """Core search logic: matrix multiplication + vectorized boosting.
+
+    Args:
+        query: Search query text
+        memories: List of memory dicts, each must have 'embedding' key
+        top_k: Number of results to return
+
+    Returns:
+        List of (index, base_similarity, final_score, total_boost)
+        sorted by descending final_score.
+    """
+    if not memories:
+        return []
+
+    # Stack all embeddings into a matrix and normalize
+    memory_matrix = np.array([m['embedding'] for m in memories])
+    norm = np.linalg.norm(memory_matrix, axis=1, keepdims=True)
+    norm[norm == 0] = 1
+    normalized_matrix = memory_matrix / norm
+
+    # Encode and normalize query
+    query_embedding = model.encode(query)
+    query_norm = np.linalg.norm(query_embedding)
+    normalized_query = query_embedding / query_norm if query_norm > 0 else query_embedding
+
+    # Base cosine similarity via single matrix multiply
+    base_similarities = np.dot(normalized_matrix, normalized_query)
+
+    # Vectorized boosting
+    retrieval_counts = np.array([m.get('retrieval_count', 0) for m in memories])
+    retrieval_boosts = np.minimum(retrieval_counts * 0.01, 0.05)
+
+    importances = np.array([m.get('importance', 5) for m in memories])
+    importance_boosts = importances * 0.002
+
+    query_terms = set(query.lower().split())
+    tag_boosts = np.array([
+        0.03 if not query_terms.isdisjoint(set(t.lower() for t in m.get('tags', [])))
+        else 0.0
+        for m in memories
+    ])
+
+    # Final scores
+    final_scores = base_similarities + retrieval_boosts + importance_boosts + tag_boosts
+    top_k = min(top_k, len(memories))
+    top_indices = np.argsort(final_scores)[-top_k:][::-1]
+
+    results = []
+    for idx in top_indices:
+        base = float(base_similarities[idx])
+        final = float(final_scores[idx])
+        boost = final - base
+        results.append((int(idx), base, final, boost))
+    return results
+
+
 @mcp.tool()
 def search_memory(
         query: str,
@@ -240,87 +477,25 @@ def search_memory(
     """Search for semantically similar memories using vectorized operations."""
     logger.info(f"Searching for: {query}")
 
-    # Validate top_k
     top_k = max(1, min(10, top_k))
 
-    # Load all memories
     memories = load_all_memories()
     if not memories:
         return "No memories found in the system yet. Use add_memory to create your first memory!"
 
-    # --- PHASE 1: PREPARATION (Vectorization) ---
+    results = _search_memories_core(query, memories, top_k)
 
-    # 1. Stack all memory embeddings into a single 2D matrix (Fast!)
-    # Shape: (Num_Memories, 384)
-    memory_matrix = np.array([m['embedding'] for m in memories])
+    logger.info(f"Found {len(results)} results")
+    output_lines = [f"Found {len(memories)} total memories, showing top {len(results)}:\n"]
 
-    # 2. Normalize the matrix for Cosine Similarity
-    # This creates a matrix where every vector has length 1
-    norm = np.linalg.norm(memory_matrix, axis=1, keepdims=True)
-    # Avoid division by zero if a memory has a zero vector (unlikely but safe)
-    norm[norm == 0] = 1
-    normalized_matrix = memory_matrix / norm
-
-    # 3. Prepare the Query Vector
-    query_embedding = model.encode(query)
-    query_norm = np.linalg.norm(query_embedding)
-    if query_norm > 0:
-        normalized_query = query_embedding / query_norm
-    else:
-        normalized_query = query_embedding
-
-    # --- PHASE 2: THE "100x FASTER" MATH ---
-
-    # Calculate ALL base similarities in ONE operation
-    # (Dot product of the matrix vs the query vector)
-    base_similarities = np.dot(normalized_matrix, normalized_query)
-
-    # --- PHASE 3: VECTORIZED BOOSTING ---
-
-    # 1. Retrieval Boost: Extract counts into an array and apply logic
-    retrieval_counts = np.array([m.get('retrieval_count', 0) for m in memories])
-    # Apply logic: min(count * 0.01, 0.05)
-    retrieval_boosts = np.minimum(retrieval_counts * 0.01, 0.05)
-
-    # 2. Importance Boost: Extract importance into an array
-    importances = np.array([m.get('importance', 5) for m in memories])
-    importance_boosts = importances * 0.002
-
-    # 3. Tag Matching: (List comprehension is fast enough for boolean checks)
-    query_terms = set(query.lower().split())
-    tag_boosts = np.array([
-        0.03 if not query_terms.isdisjoint(set(t.lower() for t in m.get('tags', [])))
-        else 0.0
-        for m in memories
-    ])
-
-    # --- PHASE 4: FINAL SCORE & SORTING ---
-
-    # Add everything together (numpy handles element-wise addition automatically)
-    final_scores = base_similarities + retrieval_boosts + importance_boosts + tag_boosts
-
-    # Get the indices of the top_k scores
-    # argsort gives ascending order, so we take the last k elements and reverse them
-    top_indices = np.argsort(final_scores)[-top_k:][::-1]
-
-    # --- PHASE 5: FORMAT OUTPUT ---
-
-    logger.info(f"Found {len(top_indices)} results")
-    output_lines = [f"Found {len(memories)} total memories, showing top {len(top_indices)}:\n"]
-
-    for i, idx in enumerate(top_indices, 1):
+    for i, (idx, base_sim, final_score, total_boost) in enumerate(results, 1):
         mem = memories[idx]
-        sim = base_similarities[idx]
-        final = final_scores[idx]
-
-        # Calculate the total boost applied for display
-        total_boost = final - sim
         boost_str = f" (+{total_boost:.3f} boost)" if total_boost > 0 else ""
+        mem_type = mem.get('type', 'general')
 
-        # Update retrieval count for the winners
         update_memory_retrieval(mem)
 
-        output_lines.append(f"{i}. [{mem['id']}] Similarity: {final:.3f}{boost_str}")
+        output_lines.append(f"{i}. [{mem['id']}] ({mem_type}) Similarity: {final_score:.3f}{boost_str}")
         output_lines.append(f"   {mem['text']}")
         output_lines.append(f"   Tags: {', '.join(mem['tags']) if mem['tags'] else 'none'}")
         output_lines.append(
@@ -341,14 +516,16 @@ def list_memories(limit: int = 10) -> str:
     # Validate limit
     limit = max(1, min(50, limit))
     
-    memories = load_all_memories(include_embeddings=False)
-    
+    all_memories = load_all_memories(include_embeddings=False)
+    # Exclude journal companion memories — journal has its own tools
+    memories = [m for m in all_memories if m.get('type') != 'journal']
+
     if not memories:
         return "No memories stored yet. Use add_memory to create your first memory!"
-    
+
     # Sort by date (most recent first)
     memories.sort(key=lambda m: m.get('date', ''), reverse=True)
-    
+
     output_lines = [f"Total memories: {len(memories)}\nShowing {min(limit, len(memories))} most recent:\n"]
     
     for mem in memories[:limit]:
@@ -368,10 +545,12 @@ def get_context_summary() -> str:
     """
     logger.info("Generating context summary...")
     
-    memories = load_all_memories(include_embeddings=False)
+    all_memories = load_all_memories(include_embeddings=False)
+    # Exclude journal companion memories — journal has its own orientation tool
+    memories = [m for m in all_memories if m.get('type') != 'journal']
     if not memories:
         return "No memories found. Start by adding some with add_memory!"
-    
+
     # 1. Get 5 most recent
     recent = sorted(memories, key=lambda m: m.get('date', ''), reverse=True)[:5]
     
@@ -405,8 +584,8 @@ def visualize_memories() -> str:
     """
     logger.info("Initializing visualization...")
     
-    # 1. Export Data
-    memories = load_all_memories()
+    # 1. Export Data (exclude journal companion memories — journal has its own space)
+    memories = [m for m in load_all_memories() if m.get('type') != 'journal']
     export_data = []
     for mem in memories:
         export_data.append({
@@ -462,6 +641,287 @@ def visualize_memories() -> str:
     except Exception as e:
         logger.error(f"Failed to open browser: {e}")
         return f"✓ Data updated. Please open this file manually to see the nebula:\n{viz_dest}"
+
+
+# ============================================================
+# Journal Tools
+# ============================================================
+
+@mcp.tool()
+def write_journal(
+    title: str,
+    content: str,
+    author: str,
+    tags: str = "",
+    importance: int = 5,
+    summary: str = ""
+) -> str:
+    """Write a new journal entry. Creates a markdown file with YAML frontmatter
+    and a companion memory for semantic search.
+
+    Args:
+        title: Entry title (used for filename and display)
+        content: Full journal entry text (markdown)
+        author: Author name (e.g. "Sunshine", "Valentine", "Newbie")
+        tags: Comma-separated tags (e.g. "relationship,milestone")
+        importance: Importance rating 1-10
+        summary: Brief 1-2 sentence summary for search (auto-generated if empty)
+    """
+    logger.info(f"Writing journal entry: {title}")
+
+    _ensure_journal_dirs()
+    importance = max(1, min(10, importance))
+
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    slug = _generate_slug(title)
+    entry_path = _resolve_entry_path(date_str, slug)
+
+    tag_list = [t.strip() for t in tags.split(',') if t.strip()]
+
+    # Auto-generate summary if not provided
+    if not summary.strip():
+        summary_text = content[:150].rstrip()
+        if len(content) > 150:
+            summary_text += "..."
+    else:
+        summary_text = summary.strip()
+
+    # Build entry file
+    metadata = {
+        "date": date_str,
+        "author": author,
+        "title": title,
+        "summary": summary_text,
+        "tags": tag_list,
+        "importance": importance,
+        "pinned": False
+    }
+    frontmatter = _build_frontmatter(metadata)
+    entry_content = f"{frontmatter}\n\n{content}\n"
+
+    try:
+        with open(entry_path, 'w', encoding='utf-8') as f:
+            f.write(entry_content)
+        logger.info(f"Journal entry saved: {entry_path.name}")
+    except IOError as e:
+        logger.error(f"Failed to write journal entry: {e}")
+        return f"Failed to write journal entry: {str(e)}"
+
+    # Create companion memory (embed full content for rich search)
+    memory_id = get_next_memory_id()
+    relative_path = f"journal/entries/{entry_path.name}"
+    memory_text = f"{summary_text} | File: {relative_path}"
+
+    try:
+        embedding = model.encode(content)
+        companion = {
+            "id": f"{memory_id:03d}",
+            "text": memory_text,
+            "date": date_str,
+            "tags": tag_list,
+            "type": "journal",
+            "importance": importance,
+            "retrieval_count": 0,
+            "last_accessed": None,
+            "embedding": embedding.tolist()
+        }
+        memory_path = MEMORIES_DIR / f"memory_{memory_id:03d}.json"
+        with open(memory_path, 'w', encoding='utf-8') as f:
+            json.dump(companion, f, indent=2)
+        logger.info(f"Companion memory #{memory_id} created for journal entry")
+    except Exception as e:
+        logger.error(f"Failed to create companion memory: {e}")
+        return f"Journal entry saved to {entry_path.name}, but companion memory failed: {str(e)}"
+
+    # Regenerate latest.md
+    _regenerate_latest_md()
+
+    return (
+        f"Journal entry saved!\n"
+        f"  Entry: {relative_path}\n"
+        f"  Memory: #{memory_id:03d}\n"
+        f"  Author: {author}\n"
+        f"  Tags: {', '.join(tag_list) if tag_list else 'none'}\n"
+        f"  Importance: {importance}/10"
+    )
+
+
+@mcp.tool()
+def read_journal_latest(count: int = None) -> str:
+    """Read the latest journal entries for orientation. Returns pinned entries
+    first, then most recent.
+
+    Args:
+        count: Number of entries to include (default from config, typically 3)
+    """
+    logger.info(f"Reading journal latest (count={count})")
+
+    # Fast path: read pre-generated file if no override requested
+    if count is None and JOURNAL_LATEST_PATH.exists():
+        try:
+            with open(JOURNAL_LATEST_PATH, 'r', encoding='utf-8') as f:
+                return f.read()
+        except IOError as e:
+            logger.error(f"Failed to read latest.md: {e}")
+
+    # Dynamic composition (count override or file doesn't exist)
+    return _compose_latest(count)
+
+
+@mcp.tool()
+def search_journal(query: str, top_k: int = 3) -> str:
+    """Search journal entries by semantic similarity.
+
+    Args:
+        query: What to search for (e.g. "that night we felt vulnerable")
+        top_k: Number of results (default 3, max 10)
+    """
+    logger.info(f"Searching journal for: {query}")
+
+    top_k = max(1, min(10, top_k))
+
+    memories = load_all_memories()
+    journal_memories = [m for m in memories if m.get('type') == 'journal']
+
+    if not journal_memories:
+        return "No journal entries found. Use write_journal to create your first entry."
+
+    results = _search_memories_core(query, journal_memories, top_k)
+
+    output_lines = [f"Found {len(journal_memories)} journal entries, showing top {len(results)}:\n"]
+
+    for i, (idx, base_sim, final_score, total_boost) in enumerate(results, 1):
+        mem = journal_memories[idx]
+        boost_str = f" (+{total_boost:.3f} boost)" if total_boost > 0 else ""
+
+        update_memory_retrieval(mem)
+
+        # Extract summary and filepath from text
+        text = mem.get('text', '')
+        if ' | File: ' in text:
+            display_summary, filepath = text.rsplit(' | File: ', 1)
+        else:
+            display_summary = text
+            filepath = 'unknown'
+
+        output_lines.append(f"{i}. [{mem['id']}] Similarity: {final_score:.3f}{boost_str}")
+        output_lines.append(f"   {display_summary}")
+        output_lines.append(f"   File: {filepath}")
+        output_lines.append(f"   Tags: {', '.join(mem['tags']) if mem['tags'] else 'none'}")
+        output_lines.append(
+            f"   Importance: {mem['importance']}/10, Retrieved: {mem.get('retrieval_count', 0)} times\n")
+
+    return '\n'.join(output_lines)
+
+
+@mcp.tool()
+def list_journal_entries(limit: int = 10) -> str:
+    """List journal entries with metadata, newest first.
+
+    Args:
+        limit: Maximum entries to show (default 10, max 50)
+    """
+    logger.info(f"Listing journal entries (limit: {limit})")
+
+    limit = max(1, min(50, limit))
+
+    if not JOURNAL_ENTRIES_DIR.exists():
+        return "No journal entries yet. Use write_journal to create your first entry."
+
+    entries = []
+    for filepath in JOURNAL_ENTRIES_DIR.glob("*.md"):
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                raw = f.read()
+            metadata, _ = _parse_frontmatter(raw)
+            metadata['_filename'] = filepath.name
+            entries.append(metadata)
+        except IOError as e:
+            logger.error(f"Failed to read {filepath}: {e}")
+
+    if not entries:
+        return "No journal entries yet. Use write_journal to create your first entry."
+
+    entries.sort(key=lambda e: str(e.get('date', '')), reverse=True)
+
+    total = len(entries)
+    shown = entries[:limit]
+
+    output_lines = [f"Journal: {total} entries, showing {len(shown)} most recent:\n"]
+    output_lines.append(f"{'Date':<12} {'Author':<14} {'Title':<30} {'Imp':>3} {'Pin':>3}  Filename")
+    output_lines.append(f"{'-'*12} {'-'*14} {'-'*30} {'-'*3} {'-'*3}  {'-'*20}")
+
+    for e in shown:
+        date = str(e.get('date', '?'))[:10]
+        author = str(e.get('author', '?'))[:14]
+        title = str(e.get('title', 'Untitled'))[:30]
+        imp = str(e.get('importance', '?'))
+        pin = 'Yes' if e.get('pinned', False) else ' No'
+        fname = e.get('_filename', '?')
+        output_lines.append(f"{date:<12} {author:<14} {title:<30} {imp:>3} {pin:>3}  {fname}")
+
+    return '\n'.join(output_lines)
+
+
+@mcp.tool()
+def pin_journal_entry(filename: str, pinned: bool = True) -> str:
+    """Pin or unpin a journal entry. Pinned entries always appear in latest.md.
+
+    Args:
+        filename: Entry filename (e.g. "2026-02-25_doors-opening.md")
+        pinned: True to pin, False to unpin
+    """
+    logger.info(f"{'Pinning' if pinned else 'Unpinning'} journal entry: {filename}")
+
+    entry_path = JOURNAL_ENTRIES_DIR / filename
+    if not entry_path.exists():
+        return f"Entry not found: {filename}"
+
+    try:
+        with open(entry_path, 'r', encoding='utf-8') as f:
+            raw = f.read()
+    except IOError as e:
+        return f"Failed to read entry: {str(e)}"
+
+    metadata, body = _parse_frontmatter(raw)
+
+    if pinned:
+        # Check pin limit
+        config = _load_journal_config()
+        max_pins = config['max_pins']
+        current_pins = []
+        for fp in JOURNAL_ENTRIES_DIR.glob("*.md"):
+            if fp.name == filename:
+                continue
+            try:
+                with open(fp, 'r', encoding='utf-8') as f:
+                    m, _ = _parse_frontmatter(f.read())
+                if m.get('pinned', False):
+                    current_pins.append(f"  - {fp.name}: {m.get('title', 'Untitled')}")
+            except IOError:
+                continue
+
+        if len(current_pins) >= max_pins:
+            pin_list = '\n'.join(current_pins)
+            return (
+                f"Cannot pin: already at maximum ({max_pins} pins).\n"
+                f"Currently pinned:\n{pin_list}\n\n"
+                f"Unpin one first with pin_journal_entry(filename, pinned=False)."
+            )
+
+    metadata['pinned'] = pinned
+    new_content = _build_frontmatter(metadata) + "\n\n" + body + "\n"
+
+    try:
+        with open(entry_path, 'w', encoding='utf-8') as f:
+            f.write(new_content)
+    except IOError as e:
+        return f"Failed to update entry: {str(e)}"
+
+    _regenerate_latest_md()
+
+    action = "Pinned" if pinned else "Unpinned"
+    return f"{action}: {filename} ({metadata.get('title', 'Untitled')}). latest.md regenerated."
 
 
 def main():
