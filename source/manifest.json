@@ -2,7 +2,7 @@
   "dxt_version": "0.1",
   "name": "claude-memory",
   "display_name": "Claude's Semantic Memory System",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "A semantic memory system that lets Claude store and search memories using vector embeddings",
   "long_description": "This extension gives Claude a persistent semantic memory system. Memories are stored as vector embeddings, allowing Claude to search for related memories by meaning rather than just keywords. The system tracks retrieval patterns and boosts frequently accessed memories, mimicking how human memory works.\n\nMemories are stored in a configurable directory on your local machine and are never sent to external servers. This extension only accesses the directory you specify for storing memories - it does not access any other files on your computer.",
   "author": {
@@ -43,8 +43,16 @@
       "description": "Retrieve a 'Smart Context' of recent and high-importance memories"
     },
     {
+      "name": "add_memory_force",
+      "description": "Force-add a memory bypassing the duplicate check"
+    },
+    {
       "name": "update_memory",
       "description": "Refine or correct an existing memory by its ID"
+    },
+    {
+      "name": "delete_memory",
+      "description": "Delete a single memory by its ID"
     },
     {
       "name": "visualize_memories",
@@ -52,7 +60,7 @@
     },
     {
       "name": "write_journal",
-      "description": "Write a narrative journal entry with YAML frontmatter and companion memory"
+      "description": "Write a narrative journal entry with companion memory for search"
     },
     {
       "name": "read_journal_latest",
@@ -97,7 +105,7 @@
     "memories_directory": {
       "type": "directory",
       "title": "Memories Directory",
-      "description": "Where to store your semantic memories. This extension ONLY accesses this directory - no other files on your computer. All memories will be saved here as JSON files with embeddings.",
+      "description": "Where to store your semantic memories. This extension ONLY accesses this directory - no other files on your computer. Memories are stored in a shared.db SQLite database.",
       "required": true,
       "default": "~/.claude-memories"
     }

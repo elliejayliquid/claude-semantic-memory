@@ -377,7 +377,7 @@
                     item.className = 'memory-item';
                     item.dataset.id = m.id;
                     item.innerHTML = `
-                        <div class="item-text">${m.text}</div>
+                        <div class="item-text">[${m.id}] ${m.text}</div>
                         <div class="item-meta">
                             <span>${m.date}</span>
                             <span>#${m.tags[0] || 'general'}</span>
@@ -503,7 +503,7 @@
                 .on("mouseover", (e, d) => {
                     tooltip.style("display", "block")
                         .html(`
-                            <h4>${d.raw.text}</h4>
+                            <h4>[${d.raw.id}] ${d.raw.text}</h4>
                             <div>${d.raw.tags.map(t => `<span class="tag">${t}</span>`).join('')}</div>
                             <div style="margin-top:10px; font-size:12px; color:#aaa; display:flex; justify-content:space-between;">
                                 <span>Level: ${d.importance}/10</span>

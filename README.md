@@ -2,7 +2,8 @@
 
 Recent updates:
 
-- 28.02.2026 - **Journal System** — New tools for structured journaling with YAML frontmatter, semantic search, pinning, and auto-generated orientation summaries (v1.1.0)
+- 13.04.2026 - **SQLite Migration** — Memories and journal entries now stored in `shared.db` (SQLite with WAL mode). Added duplicate detection, `delete_memory`, and `add_memory_force` tools. Dropped PyYAML dependency. (v1.2.0)
+- 28.02.2026 - **Journal System** — New tools for structured journaling with semantic search, pinning, and auto-generated orientation summaries (v1.1.0)
 - 02.02.2026 - Improved the search algorithm to better handle backdated memories and boost based on importance and 'tags' inclusion (v1.0.4)
 
 A persistent semantic memory system for Claude Desktop that uses vector embeddings to store and search memories by meaning, not just keywords.
@@ -10,10 +11,12 @@ A persistent semantic memory system for Claude Desktop that uses vector embeddin
 ## Features
 
 - **Semantic Search**: Find related memories even when they don't share exact words
-- **Journal System**: Structured journaling with YAML frontmatter, pinning, and auto-generated orientation summaries
+- **Journal System**: Structured journaling with pinning and orientation summaries
+- **Duplicate Detection**: Warns when a new memory is too similar to an existing one (cosine similarity > 0.9)
 - **Immersive Visualization**: Explore your memories in the **Semantic Nebula**—a dynamic interstellar map with a real-time memory counter
 - **Retrieval Tracking**: Frequently accessed memories get boosted in search results and pulse in the nebula
-- **Advanced Management**: Backdate memories with the `date` argument or refine them with `update_memory`
+- **SQLite Storage**: All data stored in a single `shared.db` file (WAL mode for safe concurrent access)
+- **Advanced Management**: Backdate memories, refine with `update_memory`, or remove with `delete_memory`
 - **Auto-Installer**: Completely "One-Click"—automatically handles Python dependencies on first run
 - **Local & Private**: All memories stored on your machine, never sent to external servers
 
@@ -29,13 +32,13 @@ A persistent semantic memory system for Claude Desktop that uses vector embeddin
 **Python 3.10 or higher** with the following packages installed:
 
 ```bash
-pip install mcp sentence-transformers numpy pyyaml
+pip install mcp sentence-transformers numpy
 ```
 
 **Note**: On first run, the extension will download the `all-MiniLM-L6-v2` embedding model (~90MB). This happens automatically.
 
 > [!TIP]
-> **One-Click Ready**: If you have Python installed but forgot the libraries, the extension will now automatically detect and install missing dependencies (`mcp`, `numpy`, `sentence-transformers`, `pyyaml`) on its very first run!
+> **One-Click Ready**: If you have Python installed but forgot the libraries, the extension will now automatically detect and install missing dependencies (`mcp`, `numpy`, `sentence-transformers`) on its very first run!
 
 ### Install the Extension
 
@@ -46,18 +49,20 @@ pip install mcp sentence-transformers numpy pyyaml
 5. Choose a directory where your memories will be stored
 6. Click "Install"
 
-That's it! Claude now has access to eleven powerful tools:
+That's it! Claude now has access to thirteen tools:
 
 ### Memory Tools
-- `add_memory` - Store new memories (supports an optional `date` argument for backdating)
-- `search_memory` - Find related memories (optimized to save context tokens)
+- `add_memory` - Store new memories with automatic duplicate detection
+- `add_memory_force` - Store a memory bypassing the duplicate check
+- `search_memory` - Find related memories by semantic similarity
 - `list_memories` - Browse your most recent entries
 - `get_context_summary` - Retrieve a "Smart Context" of recent and key memories
 - `update_memory` - Refine, correct, or expand an existing memory entry
+- `delete_memory` - Remove a single memory by ID
 - `visualize_memories` - Launch the **Semantic Nebula** in your browser
 
 ### Journal Tools
-- `write_journal` - Write a narrative journal entry with YAML frontmatter and a companion memory
+- `write_journal` - Write a narrative journal entry with a companion memory for search
 - `read_journal_latest` - Read the latest curated journal entries for session orientation
 - `search_journal` - Search journal entries by semantic similarity
 - `list_journal_entries` - List all journal entries with metadata
@@ -74,43 +79,14 @@ Once installed, Claude will automatically use the memory system when appropriate
 
 ## Journal System
 
-The journal system provides structured, persistent journaling with semantic search. Journal entries are stored as individual Markdown files with YAML frontmatter inside `{memories_directory}/journal/entries/`.
+The journal system provides structured, persistent journaling with semantic search. Journal entries are stored in the `journal_entries` table of `shared.db`.
 
 ### How It Works
 
-- **Write**: `write_journal` creates a `.md` file with frontmatter (date, author, title, tags, importance) and a companion memory embedding for semantic search.
-- **Orient**: `read_journal_latest` returns the most recent entries (default: 3) for quick session orientation — no need to read through an entire history.
-- **Pin**: Important entries can be pinned (default max: 2) so they always appear in the latest view, even as new entries push older ones out.
+- **Write**: `write_journal` creates a database entry and a companion memory embedding for semantic search.
+- **Orient**: `read_journal_latest` returns pinned entries first, then the most recent (default: 3) for quick session orientation.
+- **Pin**: Important entries can be pinned (max: 2) so they always appear in the latest view, even as new entries push older ones out.
 - **Search**: `search_journal` uses the same vector similarity engine as `search_memory`, but scoped to journal entries only.
-
-### Configuration
-
-The journal uses sensible defaults but can be customized by creating a `journal/config.json` file in your memories directory:
-
-```json
-{
-  "latest_count": 3,
-  "max_pins": 2
-}
-```
-
-### Entry Format
-
-```markdown
----
-date: '2026-01-15'
-author: Claude
-title: A Memorable Day
-summary: Short summary for quick scanning
-tags:
-- reflection
-- milestone
-importance: 7
-pinned: false
----
-
-The full journal entry content goes here...
-```
 
 > **Note**: Journal entries are private to the journal system. They do **not** appear in the memory visualizer, `list_memories`, or `get_context_summary`. They *are* included in `search_memory` results (marked with their type) so that semantic search can draw on the full knowledge base.
 
@@ -118,13 +94,17 @@ The full journal entry content goes here...
 
 ## How It Works
 
-Memories are stored as JSON files with 384-dimensional vector embeddings generated using the [sentence-transformers](https://www.sbert.net/) library.
+Memories are stored in a SQLite database (`shared.db`) with 384-dimensional vector embeddings generated using the [sentence-transformers](https://www.sbert.net/) library. Embeddings are stored as compact float32 BLOBs.
 
 ### The Retrieval Loop
 
 1. **Embedding**: Converts your query into a vector in a 384-dimensional space.
-2. **Scoring**: Calculates similarity scores between your query and all stored memories.
-3. **Boosting**: Strengthens results for frequently accessed memories (mimicking human neurons!) + boost based on importance and 'tags' inclusion.
+2. **Scoring**: Matrix multiplication computes cosine similarity between your query and all stored memories in a single operation.
+3. **Boosting**: Strengthens results for frequently accessed memories (mimicking human neurons!) + boost based on importance and tag overlap.
+
+### Duplicate Detection
+
+When adding a new memory, the system checks cosine similarity against all existing memories. If a match exceeds 0.9, it warns you and suggests using `update_memory` instead. Use `add_memory_force` to bypass the check when you know what you're doing.
 
 ### The Semantic Nebula
 
@@ -133,32 +113,27 @@ The visualization system uses a **D3-force physics engine** to map your thoughts
 - **Constellations**: Similar memories are pulled together, forming natural topic clusters.
 - **Star Intensity**: Frequently retrieved memories glow brighter and pulse with light.
 - **Memory Vault**: A side panel with a real-time **Memory Counter** and search navigation.
-- **No-Truncation Tooltips**: Long memories are fully readable in sleek, scrollable pop-ups.
+- **No-Truncation Tooltips**: Long memories are fully readable in sleek, scrollable pop-ups with memory IDs.
 - **Focus Beam**: Use the sidebar to find and "fly" directly to any memory in the void.
 
-## Memory Format
+## Storage Format
 
-Each memory is stored as a JSON file containing:
+All data lives in `{memories_directory}/shared.db`, a SQLite database with WAL mode enabled for safe concurrent access. The database contains two tables:
 
-```json
-{
-  "id": "001",
-  "text": "The actual memory content",
-  "date": "2026-01-06",
-  "tags": ["tag1", "tag2"],
-  "type": "achievement",
-  "importance": 8,
-  "retrieval_count": 3,
-  "last_accessed": "2026-01-06T15:30:00",
-  "embedding": [0.123, -0.456, ...]
-}
-```
+**memories** — each row stores:
+- `id` (integer, auto-increment), `text`, `date`, `tags` (JSON array), `type`, `importance` (1-10)
+- `retrieval_count`, `last_accessed` — for retrieval boosting
+- `embedding` — 384-dim float32 BLOB
+
+**journal_entries** — each row stores:
+- `id` (slug string, e.g. `2026-03-31_coming-home`), `author`, `title`, `entry_type`, `content`
+- `tags` (JSON array), `importance`, `pinned`, `date`
 
 ## Configuration
 
 The extension asks for one configuration parameter:
 
-- **Memories Directory**: Where to store memory files (default: `~/.claude-memories`)
+- **Memories Directory**: Where to store the `shared.db` database (default: `~/.claude-memories`)
 
 You can change this location at any time in Claude Desktop settings.
 
@@ -167,7 +142,7 @@ You can change this location at any time in Claude Desktop settings.
 - All memories are stored locally on your computer
 - The extension only accesses the directory you specify
 - No data is sent to external servers
-- Memory files are plain JSON and can be backed up, moved, or deleted
+- The SQLite database can be backed up, moved, or inspected with any SQLite tool
 
 ## Development
 
@@ -179,7 +154,7 @@ git clone https://github.com/elliejayliquid/claude-semantic-memory.git
 cd claude-semantic-memory/source
 
 # Install dependencies
-pip install mcp sentence-transformers numpy pyyaml
+pip install mcp sentence-transformers numpy
 
 # Install MCPB toolchain
 npm install -g @anthropic-ai/mcpb
@@ -195,7 +170,7 @@ This creates `claude-semantic-memory.mcpb` ready for installation!
 **Extension won't install**
 
 - Ensure Python 3.10+ is installed: `python --version`
-- Install required packages: `pip install mcp sentence-transformers numpy pyyaml`
+- Install required packages: `pip install mcp sentence-transformers numpy`
 
 **Model download fails**
 
@@ -220,15 +195,16 @@ Below is an example prompt for chat personalization. You can copy this block int
 You have access to a semantic memory system. Use it to maintain continuity across sessions.
 
 ## Memory Tools
-- `add_memory`: Store facts, milestones, or technical learnings. Use the optional `date` argument to backdate historical context.
+- `add_memory`: Store facts, milestones, or technical learnings. Duplicate detection will warn if a similar memory exists — use `update_memory` to refine, or `add_memory_force` to save anyway.
 - `search_memory`: Find related context by semantic meaning. Returns both regular memories and journal entries (with type labels).
 - `get_context_summary`: **Orientation Tool.** Use this at the start of a session to get a "Smart Context" of the 5 most recent and 5 most important core memories.
 - `list_memories`: **Audit Tool.** Browse a detailed chronological list of recent entries (up to 50).
 - `update_memory`: Refine or correct an existing memory by its ID.
+- `delete_memory`: Remove a memory that is no longer relevant.
 - `visualize_memories`: Open the interstellar nebula dashboard.
 
 ## Journal Tools
-- `write_journal`: Write a narrative journal entry with structured frontmatter.
+- `write_journal`: Write a narrative journal entry with a companion memory for search.
 - `read_journal_latest`: Read your most recent journal entries for orientation. Call this at the start of a session to remember where you left off.
 - `search_journal`: Search journal entries by semantic similarity.
 - `list_journal_entries`: List all journal entries with metadata.
@@ -270,15 +246,13 @@ MIT License - see LICENSE file for details
 
 ## Credits
 
-Built with love by Lighstromo Studios Ltd., Gemini & Claude 💙
+Built with love by Lighstromo Studios Ltd., Gemini & Claude
 
 ## Acknowledgments
 
 - [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) by Anthropic
 - [sentence-transformers](https://www.sbert.net/) for semantic embeddings
 - The `all-MiniLM-L6-v2` model for fast, quality embeddings
-- [PyYAML](https://pyyaml.org/) for journal frontmatter parsing
-- [Antigravity](https://antigravity.google/) by Google
 
 ##
 

@@ -5,27 +5,26 @@ import re
 import sys
 import subprocess
 import importlib.util
+import sqlite3
 import webbrowser
 import shutil
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 def check_and_install_dependencies():
     """Check for required dependencies and install them if missing"""
-    # Mapping of import name to pip package name
     dependencies = {
         "mcp": "mcp",
         "sentence_transformers": "sentence-transformers",
-        "numpy": "numpy",
-        "yaml": "pyyaml"
+        "numpy": "numpy"
     }
-    
+
     missing = []
     for import_name, pip_name in dependencies.items():
         if importlib.util.find_spec(import_name) is None:
             missing.append(pip_name)
-    
+
     if missing:
         print(f"One-Click Install: Missing dependencies detected: {', '.join(missing)}", file=sys.stderr)
         print("Installing now... (this may take a minute on the first run)", file=sys.stderr)
@@ -43,7 +42,6 @@ check_and_install_dependencies()
 from mcp.server.fastmcp import FastMCP
 from sentence_transformers import SentenceTransformer
 import numpy as np
-import yaml
 
 # Configure logging to stderr (NOT stdout!)
 logging.basicConfig(
@@ -57,10 +55,8 @@ logger = logging.getLogger(__name__)
 mcp = FastMCP("claude-memory")
 
 # Get memories directory from environment or use default
-# This allows users to configure where their memories are stored
 raw_dir = os.environ.get('CLAUDE_MEMORIES_DIR')
 if raw_dir:
-    # Handle literal "${HOME}" or "~" if passed as a string or from UI
     raw_dir = raw_dir.replace('${HOME}', str(Path.home()))
     MEMORIES_DIR = Path(raw_dir).expanduser().resolve()
 else:
@@ -71,27 +67,328 @@ MODEL_NAME = 'all-MiniLM-L6-v2'
 MEMORIES_DIR.mkdir(parents=True, exist_ok=True)
 logger.info(f"Using memories directory: {MEMORIES_DIR}")
 
-# Journal subsystem paths (directories created lazily on first write)
-JOURNAL_DIR = MEMORIES_DIR / "journal"
-JOURNAL_ENTRIES_DIR = JOURNAL_DIR / "entries"
-JOURNAL_CONFIG_PATH = JOURNAL_DIR / "config.json"
-JOURNAL_LATEST_PATH = JOURNAL_DIR / "latest.md"
-DEFAULT_LATEST_COUNT = 3
-DEFAULT_MAX_PINS = 2
-
 # Load embedding model
 logger.info("Loading embedding model...")
 model = SentenceTransformer(MODEL_NAME)
 logger.info("Model loaded successfully!")
 
 
-def get_next_memory_id() -> int:
-    """Find the next available memory ID"""
-    existing = list(MEMORIES_DIR.glob("memory_*.json"))
-    if not existing:
-        return 1
-    ids = [int(f.stem.replace('memory_', '')) for f in existing]
-    return max(ids) + 1
+# ============================================================
+# SQLite Database Layer
+# ============================================================
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS memories (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    text            TEXT NOT NULL,
+    tags            TEXT NOT NULL DEFAULT '[]',
+    type            TEXT NOT NULL DEFAULT 'fact',
+    importance      INTEGER NOT NULL DEFAULT 5,
+    retrieval_count INTEGER NOT NULL DEFAULT 0,
+    last_accessed   TEXT,
+    supersedes      INTEGER,
+    journal_file    TEXT,
+    date            TEXT NOT NULL DEFAULT (datetime('now')),
+    embedding       BLOB
+);
+CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(type, date DESC);
+CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance DESC);
+
+CREATE TABLE IF NOT EXISTS journal_entries (
+    id               TEXT PRIMARY KEY,
+    author           TEXT NOT NULL DEFAULT 'Pulse',
+    title            TEXT,
+    entry_type       TEXT NOT NULL,
+    content          TEXT NOT NULL,
+    why_it_mattered  TEXT,
+    tags             TEXT NOT NULL DEFAULT '[]',
+    importance       INTEGER NOT NULL DEFAULT 5,
+    pinned           INTEGER NOT NULL DEFAULT 0,
+    resolved         INTEGER,
+    date             TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_journal_type ON journal_entries(entry_type, date DESC);
+"""
+
+
+class MemoryDatabase:
+    """SQLite database for the shared memory system."""
+
+    def __init__(self, db_path: Path):
+        self.db_path = Path(db_path)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA foreign_keys=ON")
+        self.conn.executescript(_SCHEMA)
+        self.conn.commit()
+        logger.info(f"Database opened: {self.db_path}")
+
+    def close(self):
+        self.conn.close()
+
+    # ── Memories ─────────────────────────────────────────────
+
+    def save_memory(self, text: str, tags: list[str] | None = None,
+                    type: str = "fact", importance: int = 5,
+                    embedding: Optional[bytes] = None,
+                    supersedes: Optional[int] = None,
+                    journal_file: Optional[str] = None,
+                    date: Optional[str] = None) -> int:
+        tags_json = json.dumps(tags or [])
+        if date:
+            cur = self.conn.execute(
+                "INSERT INTO memories (text, tags, type, importance, embedding, "
+                "supersedes, journal_file, date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (text, tags_json, type, importance, embedding,
+                 supersedes, journal_file, date)
+            )
+        else:
+            cur = self.conn.execute(
+                "INSERT INTO memories (text, tags, type, importance, embedding, "
+                "supersedes, journal_file) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (text, tags_json, type, importance, embedding,
+                 supersedes, journal_file)
+            )
+        self.conn.commit()
+        return cur.lastrowid
+
+    def get_memory(self, memory_id: int) -> Optional[dict]:
+        row = self.conn.execute(
+            "SELECT * FROM memories WHERE id = ?", (memory_id,)
+        ).fetchone()
+        if row:
+            d = dict(row)
+            d["tags"] = json.loads(d["tags"])
+            return d
+        return None
+
+    def get_all_memories(self, type_filter: Optional[str] = None,
+                         exclude_type: Optional[str] = None) -> list[dict]:
+        if type_filter:
+            rows = self.conn.execute(
+                "SELECT * FROM memories WHERE type = ? ORDER BY date DESC",
+                (type_filter,)
+            ).fetchall()
+        elif exclude_type:
+            rows = self.conn.execute(
+                "SELECT * FROM memories WHERE type != ? ORDER BY date DESC",
+                (exclude_type,)
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM memories ORDER BY date DESC"
+            ).fetchall()
+        result = []
+        for row in rows:
+            d = dict(row)
+            d["tags"] = json.loads(d["tags"])
+            result.append(d)
+        return result
+
+    def update_memory(self, memory_id: int, **fields) -> bool:
+        if not fields:
+            return False
+        # Handle tags serialization
+        if "tags" in fields and isinstance(fields["tags"], list):
+            fields["tags"] = json.dumps(fields["tags"])
+        set_clause = ", ".join(f"{k} = ?" for k in fields)
+        values = list(fields.values()) + [memory_id]
+        cur = self.conn.execute(
+            f"UPDATE memories SET {set_clause} WHERE id = ?", values
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def update_retrieval(self, memory_id: int) -> None:
+        self.conn.execute(
+            "UPDATE memories SET retrieval_count = retrieval_count + 1, "
+            "last_accessed = datetime('now') WHERE id = ?",
+            (memory_id,)
+        )
+        self.conn.commit()
+
+    def delete_memory(self, memory_id: int) -> bool:
+        cur = self.conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def get_recent_memories(self, limit: int = 5,
+                            exclude_type: Optional[str] = None) -> list[dict]:
+        if exclude_type:
+            rows = self.conn.execute(
+                "SELECT * FROM memories WHERE type != ? ORDER BY date DESC LIMIT ?",
+                (exclude_type, limit)
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM memories ORDER BY date DESC LIMIT ?",
+                (limit,)
+            ).fetchall()
+        return [self._parse_memory(row) for row in rows]
+
+    def get_top_importance(self, limit: int = 5,
+                           exclude_ids: set | None = None,
+                           exclude_type: Optional[str] = None) -> list[dict]:
+        if exclude_type:
+            rows = self.conn.execute(
+                "SELECT * FROM memories WHERE type != ? "
+                "ORDER BY importance DESC, date DESC",
+                (exclude_type,)
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM memories ORDER BY importance DESC, date DESC"
+            ).fetchall()
+        result = []
+        for row in rows:
+            d = self._parse_memory(row)
+            if exclude_ids and d["id"] in exclude_ids:
+                continue
+            result.append(d)
+            if len(result) >= limit:
+                break
+        return result
+
+    def _parse_memory(self, row) -> dict:
+        d = dict(row)
+        d["tags"] = json.loads(d["tags"])
+        return d
+
+    # ── Journal Entries ──────────────────────────────────────
+
+    def save_journal_entry(self, entry_id: str, author: str,
+                           title: Optional[str], entry_type: str,
+                           content: str, why_it_mattered: Optional[str] = None,
+                           tags: list[str] | None = None,
+                           importance: int = 5, pinned: bool = False,
+                           resolved: Optional[bool] = None,
+                           date: Optional[str] = None) -> str:
+        tags_json = json.dumps(tags or [])
+        resolved_int = None if resolved is None else int(resolved)
+        if date:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO journal_entries "
+                "(id, author, title, entry_type, content, why_it_mattered, "
+                "tags, importance, pinned, resolved, date) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (entry_id, author, title, entry_type, content,
+                 why_it_mattered, tags_json, importance, int(pinned),
+                 resolved_int, date)
+            )
+        else:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO journal_entries "
+                "(id, author, title, entry_type, content, why_it_mattered, "
+                "tags, importance, pinned, resolved) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (entry_id, author, title, entry_type, content,
+                 why_it_mattered, tags_json, importance, int(pinned),
+                 resolved_int)
+            )
+        self.conn.commit()
+        return entry_id
+
+    def get_journal_entries(self, entry_type: Optional[str] = None,
+                            limit: int = 50) -> list[dict]:
+        if entry_type:
+            rows = self.conn.execute(
+                "SELECT * FROM journal_entries WHERE entry_type = ? "
+                "ORDER BY date DESC LIMIT ?",
+                (entry_type, limit)
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM journal_entries ORDER BY date DESC LIMIT ?",
+                (limit,)
+            ).fetchall()
+        return [self._parse_journal(row) for row in rows]
+
+    def get_journal_entry(self, entry_id: str) -> Optional[dict]:
+        row = self.conn.execute(
+            "SELECT * FROM journal_entries WHERE id = ?", (entry_id,)
+        ).fetchone()
+        if row:
+            return self._parse_journal(row)
+        return None
+
+    def get_journal_latest(self, count: int = 3, max_pins: int = 2) -> list[dict]:
+        """Get pinned entries + most recent unpinned, up to count total."""
+        pinned = self.conn.execute(
+            "SELECT * FROM journal_entries WHERE pinned = 1 "
+            "ORDER BY date ASC LIMIT ?",
+            (max_pins,)
+        ).fetchall()
+        pinned_list = [self._parse_journal(r) for r in pinned]
+
+        remaining = max(0, count - len(pinned_list))
+        if remaining > 0:
+            pinned_ids = [p["id"] for p in pinned_list]
+            if pinned_ids:
+                placeholders = ",".join("?" for _ in pinned_ids)
+                rows = self.conn.execute(
+                    f"SELECT * FROM journal_entries WHERE pinned = 0 "
+                    f"AND id NOT IN ({placeholders}) "
+                    f"ORDER BY date DESC LIMIT ?",
+                    pinned_ids + [remaining]
+                ).fetchall()
+            else:
+                rows = self.conn.execute(
+                    "SELECT * FROM journal_entries WHERE pinned = 0 "
+                    "ORDER BY date DESC LIMIT ?",
+                    (remaining,)
+                ).fetchall()
+            unpinned_list = [self._parse_journal(r) for r in rows]
+        else:
+            unpinned_list = []
+
+        return pinned_list, unpinned_list
+
+    def update_journal_pin(self, entry_id: str, pinned: bool) -> bool:
+        cur = self.conn.execute(
+            "UPDATE journal_entries SET pinned = ? WHERE id = ?",
+            (int(pinned), entry_id)
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def count_pinned_journal(self) -> int:
+        row = self.conn.execute(
+            "SELECT COUNT(*) FROM journal_entries WHERE pinned = 1"
+        ).fetchone()
+        return row[0]
+
+    def get_pinned_journal(self) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT id, title FROM journal_entries WHERE pinned = 1 ORDER BY date"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def _parse_journal(self, row) -> dict:
+        d = dict(row)
+        d["tags"] = json.loads(d["tags"])
+        return d
+
+
+# ── Open database ────────────────────────────────────────────
+
+DB_PATH = MEMORIES_DIR / "shared.db"
+db = MemoryDatabase(DB_PATH)
+
+
+# ============================================================
+# Embedding Helpers
+# ============================================================
+
+def _embedding_to_blob(embedding) -> bytes:
+    """Convert a numpy embedding array to bytes for SQLite BLOB storage."""
+    return np.array(embedding, dtype=np.float32).tobytes()
+
+
+def _blob_to_vec(blob: bytes) -> np.ndarray:
+    """Convert a SQLite BLOB back to a numpy vector."""
+    return np.frombuffer(blob, dtype=np.float32).copy()
 
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
@@ -99,314 +396,9 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
 
 
-def load_all_memories(include_embeddings: bool = True) -> list[dict[str, Any]]:
-    """Load all memory files"""
-    memories = []
-    for filepath in MEMORIES_DIR.glob("memory_*.json"):
-        try:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                memory = json.load(f)
-                if not include_embeddings and "embedding" in memory:
-                    del memory["embedding"]
-                memory['_filepath'] = str(filepath)
-                memories.append(memory)
-        except (json.JSONDecodeError, IOError) as e:
-            logger.error(f"Failed to load memory {filepath}: {e}")
-            continue
-    return memories
-
-
-def update_memory_retrieval(memory: dict[str, Any]) -> None:
-    """Update retrieval count and last accessed time"""
-    memory['retrieval_count'] = memory.get('retrieval_count', 0) + 1
-    memory['last_accessed'] = datetime.now().isoformat()
-    
-    filepath = memory['_filepath']
-    save_memory = {k: v for k, v in memory.items() if k != '_filepath'}
-    
-    try:
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(save_memory, f, indent=2)
-    except IOError as e:
-        logger.error(f"Failed to update memory {filepath}: {e}")
-
-
 # ============================================================
-# Journal Utility Functions
+# Search Core (unchanged algorithm — matrix multiply + boosts)
 # ============================================================
-
-def _ensure_journal_dirs():
-    """Create journal directories if they don't exist (lazy initialization)."""
-    JOURNAL_ENTRIES_DIR.mkdir(parents=True, exist_ok=True)
-
-
-def _load_journal_config() -> dict:
-    """Load journal config with defaults."""
-    config = {
-        "latest_count": DEFAULT_LATEST_COUNT,
-        "max_pins": DEFAULT_MAX_PINS
-    }
-    if JOURNAL_CONFIG_PATH.exists():
-        try:
-            with open(JOURNAL_CONFIG_PATH, 'r', encoding='utf-8') as f:
-                user_config = json.load(f)
-                config.update(user_config)
-        except (json.JSONDecodeError, IOError) as e:
-            logger.warning(f"Failed to load journal config: {e}")
-    return config
-
-
-def _generate_slug(title: str, max_length: int = 50) -> str:
-    """Generate a filesystem-safe slug from a title."""
-    slug = title.lower()
-    # Remove Windows-unsafe characters: < > : " / \ | ? *
-    slug = re.sub(r'[<>:"/\\|?*]', '', slug)
-    # Replace non-alphanumeric sequences with hyphens
-    slug = re.sub(r'[^a-z0-9]+', '-', slug)
-    # Strip leading/trailing hyphens
-    slug = slug.strip('-')
-    # Truncate to max_length
-    if len(slug) > max_length:
-        slug = slug[:max_length].rstrip('-')
-    return slug or 'untitled'
-
-
-def _resolve_entry_path(date_str: str, slug: str) -> Path:
-    """Find a non-colliding entry filename."""
-    base = f"{date_str}_{slug}.md"
-    path = JOURNAL_ENTRIES_DIR / base
-    if not path.exists():
-        return path
-    counter = 2
-    while True:
-        path = JOURNAL_ENTRIES_DIR / f"{date_str}_{slug}-{counter}.md"
-        if not path.exists():
-            return path
-        counter += 1
-
-
-def _parse_frontmatter(content: str) -> tuple[dict, str]:
-    """Parse YAML frontmatter from a markdown file.
-    Returns (metadata_dict, body_text).
-    """
-    content = content.strip()
-    if not content.startswith('---'):
-        return {}, content
-
-    # Find the closing ---
-    end_idx = content.find('---', 3)
-    if end_idx == -1:
-        return {}, content
-
-    yaml_str = content[3:end_idx].strip()
-    body = content[end_idx + 3:].strip()
-
-    try:
-        metadata = yaml.safe_load(yaml_str) or {}
-    except yaml.YAMLError as e:
-        logger.error(f"Failed to parse YAML frontmatter: {e}")
-        metadata = {}
-
-    return metadata, body
-
-
-def _build_frontmatter(metadata: dict) -> str:
-    """Build YAML frontmatter string from a dict."""
-    yaml_str = yaml.dump(
-        metadata, default_flow_style=False,
-        allow_unicode=True, sort_keys=False
-    ).strip()
-    return f"---\n{yaml_str}\n---"
-
-
-def _compose_latest(count: int = None) -> str:
-    """Compose the latest journal entries.
-
-    Pinned entries first (chronologically), then most recent unpinned,
-    up to `count` total entries.
-    """
-    config = _load_journal_config()
-    if count is None:
-        count = config['latest_count']
-    max_pins = config['max_pins']
-
-    if not JOURNAL_ENTRIES_DIR.exists():
-        return "No journal entries yet. Use write_journal to create your first entry."
-
-    # Parse all entries
-    entries = []
-    for filepath in JOURNAL_ENTRIES_DIR.glob("*.md"):
-        try:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                raw = f.read()
-            metadata, body = _parse_frontmatter(raw)
-            metadata['_filepath'] = filepath
-            metadata['_body'] = body
-            metadata['_filename'] = filepath.name
-            entries.append(metadata)
-        except IOError as e:
-            logger.error(f"Failed to read journal entry {filepath}: {e}")
-
-    if not entries:
-        return "No journal entries yet. Use write_journal to create your first entry."
-
-    # Sort all by date descending
-    entries.sort(key=lambda e: str(e.get('date', '')), reverse=True)
-
-    # Separate pinned and unpinned
-    pinned = [e for e in entries if e.get('pinned', False)][:max_pins]
-    pinned.sort(key=lambda e: str(e.get('date', '')))  # Pinned: chronological
-
-    unpinned = [e for e in entries if not e.get('pinned', False)]
-    remaining_slots = max(0, count - len(pinned))
-    recent_unpinned = unpinned[:remaining_slots]
-
-    # Compose output
-    sections = ["# Journal — Latest Entries\n"]
-
-    if pinned:
-        sections.append("## Pinned\n")
-        for e in pinned:
-            sections.append(f"### {e.get('title', 'Untitled')} ({e.get('date', 'unknown')})")
-            sections.append(f"*By {e.get('author', 'Unknown')}*\n")
-            sections.append(e.get('_body', ''))
-            sections.append("\n---\n")
-
-    if recent_unpinned:
-        if pinned:
-            sections.append("## Recent\n")
-        for e in recent_unpinned:
-            sections.append(f"### {e.get('title', 'Untitled')} ({e.get('date', 'unknown')})")
-            sections.append(f"*By {e.get('author', 'Unknown')}*\n")
-            sections.append(e.get('_body', ''))
-            sections.append("\n---\n")
-
-    return '\n'.join(sections)
-
-
-def _regenerate_latest_md():
-    """Regenerate the latest.md file from current entries."""
-    _ensure_journal_dirs()
-    content = _compose_latest()
-    try:
-        with open(JOURNAL_LATEST_PATH, 'w', encoding='utf-8') as f:
-            f.write(content)
-        logger.info("Regenerated latest.md")
-    except IOError as e:
-        logger.error(f"Failed to regenerate latest.md: {e}")
-
-
-@mcp.tool()
-def add_memory(
-    text: str,
-    tags: str = "",
-    importance: int = 5,
-    memory_type: str = "general",
-    date: str = None
-) -> str:
-    """Add a new memory to the semantic memory system.
-    
-    Args:
-        text: The memory text to store
-        tags: Comma-separated tags (e.g. "project,ai,important")
-        importance: Importance rating from 1-10
-        memory_type: Type of memory (general, achievement, milestone, etc)
-        date: Optional YYYY-MM-DD date (defaults to today)
-    """
-    logger.info(f"Adding memory: {text[:50]}...")
-    
-    # Validate importance
-    importance = max(1, min(10, importance))
-    
-    memory_id = get_next_memory_id()
-    
-    # Generate embedding
-    embedding = model.encode(text)
-    
-    # Parse tags
-    tag_list = [t.strip() for t in tags.split(',') if t.strip()]
-    
-    # Create memory object
-    memory_date = date if date else datetime.now().strftime("%Y-%m-%d")
-    
-    memory = {
-        "id": f"{memory_id:03d}",
-        "text": text,
-        "date": memory_date,
-        "tags": tag_list,
-        "type": memory_type,
-        "importance": importance,
-        "retrieval_count": 0,
-        "last_accessed": None,
-        "embedding": embedding.tolist()
-    }
-    
-    # Save to file
-    filename = MEMORIES_DIR / f"memory_{memory_id:03d}.json"
-    try:
-        with open(filename, 'w', encoding='utf-8') as f:
-            json.dump(memory, f, indent=2)
-        logger.info(f"Memory #{memory_id} saved successfully")
-        return f"✓ Memory #{memory_id} added successfully: '{text[:50]}...'"
-    except IOError as e:
-        logger.error(f"Failed to save memory: {e}")
-        return f"❌ Failed to save memory: {str(e)}"
-
-
-@mcp.tool()
-def update_memory(
-    memory_id: str,
-    text: str = None,
-    tags: str = None,
-    importance: int = None,
-    memory_type: str = None,
-    date: str = None
-) -> str:
-    """Update an existing memory by its ID. Only provided fields will be changed.
-    
-    Args:
-        memory_id: The ID of the memory to update (e.g. "001")
-        text: New text for the memory
-        tags: New comma-separated tags
-        importance: New importance rating (1-10)
-        memory_type: New memory type
-        date: New YYYY-MM-DD date
-    """
-    logger.info(f"Updating memory: {memory_id}")
-    
-    filename = MEMORIES_DIR / f"memory_{memory_id}.json"
-    if not filename.exists():
-        return f"❌ Error: Memory #{memory_id} not found."
-    
-    try:
-        with open(filename, 'r', encoding='utf-8') as f:
-            memory = json.load(f)
-            
-        if text is not None:
-            memory["text"] = text
-            # Re-generate embedding if text changed
-            memory["embedding"] = model.encode(text).tolist()
-            
-        if tags is not None:
-            memory["tags"] = [t.strip() for t in tags.split(',') if t.strip()]
-            
-        if importance is not None:
-            memory["importance"] = max(1, min(10, importance))
-            
-        if memory_type is not None:
-            memory["type"] = memory_type
-            
-        if date is not None:
-            memory["date"] = date
-            
-        with open(filename, 'w', encoding='utf-8') as f:
-            json.dump(memory, f, indent=2)
-            
-        return f"✓ Memory #{memory_id} updated successfully."
-    except Exception as e:
-        logger.error(f"Failed to update memory: {e}")
-        return f"❌ Failed to update memory: {str(e)}"
-
 
 def _search_memories_core(
     query: str,
@@ -417,7 +409,7 @@ def _search_memories_core(
 
     Args:
         query: Search query text
-        memories: List of memory dicts, each must have 'embedding' key
+        memories: List of memory dicts, each must have 'embedding' (BLOB bytes)
         top_k: Number of results to return
 
     Returns:
@@ -428,7 +420,10 @@ def _search_memories_core(
         return []
 
     # Stack all embeddings into a matrix and normalize
-    memory_matrix = np.array([m['embedding'] for m in memories])
+    # Embeddings come as BLOBs from SQLite — convert to numpy
+    memory_matrix = np.array([
+        _blob_to_vec(m['embedding']) for m in memories
+    ])
     norm = np.linalg.norm(memory_matrix, axis=1, keepdims=True)
     norm[norm == 0] = 1
     normalized_matrix = memory_matrix / norm
@@ -469,6 +464,173 @@ def _search_memories_core(
     return results
 
 
+# ============================================================
+# MCP Tools — Memories
+# ============================================================
+
+@mcp.tool()
+def add_memory(
+    text: str,
+    tags: str = "",
+    importance: int = 5,
+    memory_type: str = "general",
+    date: str = None
+) -> str:
+    """Add a new memory to the semantic memory system.
+
+    Args:
+        text: The memory text to store
+        tags: Comma-separated tags (e.g. "project,ai,important")
+        importance: Importance rating from 1-10
+        memory_type: Type of memory (general, achievement, milestone, etc)
+        date: Optional YYYY-MM-DD date (defaults to today)
+    """
+    logger.info(f"Adding memory: {text[:50]}...")
+
+    importance = max(1, min(10, importance))
+    tag_list = [t.strip() for t in tags.split(',') if t.strip()]
+    memory_date = date if date else datetime.now().strftime("%Y-%m-%d")
+
+    embedding = model.encode(text)
+    embedding_blob = _embedding_to_blob(embedding)
+
+    # Dedup check: warn if a very similar memory already exists
+    existing = db.get_all_memories()
+    existing_with_emb = [m for m in existing if m.get('embedding')]
+    if existing_with_emb:
+        emb_matrix = np.array([_blob_to_vec(m['embedding']) for m in existing_with_emb])
+        norm = np.linalg.norm(emb_matrix, axis=1, keepdims=True)
+        norm[norm == 0] = 1
+        normalized = emb_matrix / norm
+        q_norm = np.linalg.norm(embedding)
+        q_normalized = embedding / q_norm if q_norm > 0 else embedding
+        similarities = np.dot(normalized, q_normalized)
+        max_idx = int(np.argmax(similarities))
+        max_sim = float(similarities[max_idx])
+
+        if max_sim > 0.9:
+            match = existing_with_emb[max_idx]
+            return (
+                f"Duplicate detected (similarity: {max_sim:.3f})!\n"
+                f"  Existing memory [{match['id']}]: {match['text'][:100]}...\n"
+                f"  Your text: {text[:100]}...\n\n"
+                f"Use update_memory to modify the existing one, "
+                f"or add_memory_force to save anyway."
+            )
+
+    memory_id = db.save_memory(
+        text=text,
+        tags=tag_list,
+        type=memory_type,
+        importance=importance,
+        embedding=embedding_blob,
+        date=memory_date
+    )
+
+    logger.info(f"Memory #{memory_id} saved successfully")
+    return f"Memory #{memory_id} added successfully: '{text[:50]}...'"
+
+
+@mcp.tool()
+def add_memory_force(
+    text: str,
+    tags: str = "",
+    importance: int = 5,
+    memory_type: str = "general",
+    date: str = None
+) -> str:
+    """Force-add a memory, bypassing the duplicate similarity check.
+    Use this only after add_memory has flagged a duplicate and you still want to save.
+
+    Args:
+        text: The memory text to store
+        tags: Comma-separated tags (e.g. "project,ai,important")
+        importance: Importance rating from 1-10
+        memory_type: Type of memory (general, achievement, milestone, etc)
+        date: Optional YYYY-MM-DD date (defaults to today)
+    """
+    importance = max(1, min(10, importance))
+    tag_list = [t.strip() for t in tags.split(',') if t.strip()]
+    memory_date = date if date else datetime.now().strftime("%Y-%m-%d")
+
+    embedding = model.encode(text)
+    embedding_blob = _embedding_to_blob(embedding)
+
+    memory_id = db.save_memory(
+        text=text,
+        tags=tag_list,
+        type=memory_type,
+        importance=importance,
+        embedding=embedding_blob,
+        date=memory_date
+    )
+
+    return f"Memory #{memory_id} force-added: '{text[:50]}...'"
+
+
+@mcp.tool()
+def update_memory(
+    memory_id: int,
+    text: str = None,
+    tags: str = None,
+    importance: int = None,
+    memory_type: str = None,
+    date: str = None
+) -> str:
+    """Update an existing memory by its ID. Only provided fields will be changed.
+
+    Args:
+        memory_id: The integer ID of the memory to update
+        text: New text for the memory
+        tags: New comma-separated tags
+        importance: New importance rating (1-10)
+        memory_type: New memory type
+        date: New YYYY-MM-DD date
+    """
+    logger.info(f"Updating memory: {memory_id}")
+
+    existing = db.get_memory(memory_id)
+    if not existing:
+        return f"Error: Memory #{memory_id} not found."
+
+    fields = {}
+    if text is not None:
+        fields["text"] = text
+        fields["embedding"] = _embedding_to_blob(model.encode(text))
+    if tags is not None:
+        fields["tags"] = [t.strip() for t in tags.split(',') if t.strip()]
+    if importance is not None:
+        fields["importance"] = max(1, min(10, importance))
+    if memory_type is not None:
+        fields["type"] = memory_type
+    if date is not None:
+        fields["date"] = date
+
+    if not fields:
+        return "No fields to update."
+
+    db.update_memory(memory_id, **fields)
+    return f"Memory #{memory_id} updated successfully."
+
+
+@mcp.tool()
+def delete_memory(memory_id: int) -> str:
+    """Delete a single memory by its ID. This action is irreversible.
+
+    Args:
+        memory_id: The integer ID of the memory to delete
+    """
+    logger.info(f"Deleting memory: {memory_id}")
+
+    existing = db.get_memory(memory_id)
+    if not existing:
+        return f"Error: Memory #{memory_id} not found."
+
+    text_preview = existing['text'][:60]
+    db.delete_memory(memory_id)
+    return f"Memory #{memory_id} deleted: '{text_preview}...'"
+
+
 @mcp.tool()
 def search_memory(
         query: str,
@@ -479,21 +641,23 @@ def search_memory(
 
     top_k = max(1, min(10, top_k))
 
-    memories = load_all_memories()
-    if not memories:
+    memories = db.get_all_memories()
+    # Filter to only memories with embeddings
+    memories_with_emb = [m for m in memories if m.get('embedding')]
+    if not memories_with_emb:
         return "No memories found in the system yet. Use add_memory to create your first memory!"
 
-    results = _search_memories_core(query, memories, top_k)
+    results = _search_memories_core(query, memories_with_emb, top_k)
 
     logger.info(f"Found {len(results)} results")
-    output_lines = [f"Found {len(memories)} total memories, showing top {len(results)}:\n"]
+    output_lines = [f"Found {len(memories_with_emb)} total memories, showing top {len(results)}:\n"]
 
     for i, (idx, base_sim, final_score, total_boost) in enumerate(results, 1):
-        mem = memories[idx]
+        mem = memories_with_emb[idx]
         boost_str = f" (+{total_boost:.3f} boost)" if total_boost > 0 else ""
         mem_type = mem.get('type', 'general')
 
-        update_memory_retrieval(mem)
+        db.update_retrieval(mem['id'])
 
         output_lines.append(f"{i}. [{mem['id']}] ({mem_type}) Similarity: {final_score:.3f}{boost_str}")
         output_lines.append(f"   {mem['text']}")
@@ -507,87 +671,79 @@ def search_memory(
 @mcp.tool()
 def list_memories(limit: int = 10) -> str:
     """List recent memories.
-    
+
     Args:
         limit: Maximum number of memories to return (default 10, max 50)
     """
     logger.info(f"Listing memories (limit: {limit})")
-    
-    # Validate limit
     limit = max(1, min(50, limit))
-    
-    all_memories = load_all_memories(include_embeddings=False)
-    # Exclude journal companion memories — journal has its own tools
-    memories = [m for m in all_memories if m.get('type') != 'journal']
+
+    memories = db.get_recent_memories(limit=limit, exclude_type="journal")
 
     if not memories:
         return "No memories stored yet. Use add_memory to create your first memory!"
 
-    # Sort by date (most recent first)
-    memories.sort(key=lambda m: m.get('date', ''), reverse=True)
+    total_row = db.conn.execute(
+        "SELECT COUNT(*) FROM memories WHERE type != 'journal'"
+    ).fetchone()
+    total = total_row[0]
 
-    output_lines = [f"Total memories: {len(memories)}\nShowing {min(limit, len(memories))} most recent:\n"]
-    
-    for mem in memories[:limit]:
+    output_lines = [f"Total memories: {total}\nShowing {len(memories)} most recent:\n"]
+
+    for mem in memories:
         output_lines.append(f"[{mem['id']}] {mem['date']} - {mem['text'][:80]}...")
         tags_str = ', '.join(mem['tags']) if mem['tags'] else 'none'
         output_lines.append(f"  Tags: {tags_str}, Importance: {mem['importance']}/10, Type: {mem.get('type', 'general')}\n")
-    
+
     return '\n'.join(output_lines)
 
 
 @mcp.tool()
 def get_context_summary() -> str:
     """Get a curated summary of memories for session context.
-    
-    Returns the 5 most recent memories and 5 highest-importance memories 
+
+    Returns the 5 most recent memories and 5 highest-importance memories
     to provide the LLM with a 'Smart Context' of the user's history.
     """
     logger.info("Generating context summary...")
-    
-    all_memories = load_all_memories(include_embeddings=False)
-    # Exclude journal companion memories — journal has its own orientation tool
-    memories = [m for m in all_memories if m.get('type') != 'journal']
-    if not memories:
+
+    recent = db.get_recent_memories(limit=5, exclude_type="journal")
+    if not recent:
         return "No memories found. Start by adding some with add_memory!"
 
-    # 1. Get 5 most recent
-    recent = sorted(memories, key=lambda m: m.get('date', ''), reverse=True)[:5]
-    
-    # 2. Get 5 most important (excluding those already in recent)
     recent_ids = {m['id'] for m in recent}
-    important = [m for m in memories if m['id'] not in recent_ids]
-    important = sorted(important, key=lambda m: m.get('importance', 0), reverse=True)[:5]
-    
+    important = db.get_top_importance(limit=5, exclude_ids=recent_ids, exclude_type="journal")
+
     output = ["### Memory Context Summary\n"]
-    
+
     output.append("#### Recent History (Continuity)")
     for m in recent:
         output.append(f"- [{m['id']}] {m['date']}: {m['text'][:120]}...")
-        
+
     if important:
         output.append("\n#### Core Context (High Importance)")
         for m in important:
             output.append(f"- [{m['id']}] {m['date']}: {m['text'][:120]}...")
-            
+
     output.append("\n*Tip: Use search_memory if you need to dig deeper into specific topics.*")
-    
+
     return '\n'.join(output)
 
 
 @mcp.tool()
 def visualize_memories() -> str:
     """Export memories and launch the interstellar nebula visualization in your browser.
-    
-    This tool sets up the Semantic Nebula dashboard in your memories directory 
+
+    This tool sets up the Semantic Nebula dashboard in your memories directory
     and opens it automatically.
     """
     logger.info("Initializing visualization...")
-    
-    # 1. Export Data (exclude journal companion memories — journal has its own space)
-    memories = [m for m in load_all_memories() if m.get('type') != 'journal']
+
+    memories = db.get_all_memories(exclude_type="journal")
     export_data = []
     for mem in memories:
+        if not mem.get('embedding'):
+            continue
         export_data.append({
             "id": mem["id"],
             "text": mem["text"],
@@ -595,9 +751,9 @@ def visualize_memories() -> str:
             "importance": mem["importance"],
             "retrieval_count": mem.get("retrieval_count", 0),
             "date": mem["date"],
-            "embedding": mem["embedding"]
+            "embedding": _blob_to_vec(mem["embedding"]).tolist()
         })
-    
+
     # Save to user's memory directory as .js to bypass CORS
     data_file = MEMORIES_DIR / "memories.js"
     try:
@@ -607,45 +763,53 @@ def visualize_memories() -> str:
             f.write(";")
     except IOError as e:
         logger.error(f"Failed to save memories.js: {e}")
-        return f"❌ Failed to export data: {str(e)}"
+        return f"Failed to export data: {str(e)}"
 
-    # 2. Setup HTML (copy from bundle to data dir)
-    # The source is in a 'visualizer' subfolder next to this script
+    # Setup HTML (copy from bundle to data dir)
     script_dir = Path(__file__).parent
     viz_src = script_dir / "visualizer" / "index.html"
     viz_dest = MEMORIES_DIR / "index.html"
-    
+
     try:
         if viz_src.exists():
             shutil.copy2(viz_src, viz_dest)
             logger.info(f"Dashboard HTML copied to {viz_dest}")
         else:
-            logger.warning(f"Visualizer source not found at {viz_src}")
-            # If we are running in dev mode, try parent/visualizer
             alt_src = script_dir.parent / "visualizer" / "index.html"
             if alt_src.exists():
                 shutil.copy2(alt_src, viz_dest)
                 logger.info(f"Dashboard HTML copied from alternative source: {alt_src}")
             else:
-                return "❌ Could not find visualizer source files in the bundle."
+                return "Could not find visualizer source files in the bundle."
     except Exception as e:
         logger.error(f"Failed to setup visualizer HTML: {e}")
-        return f"❌ Failed to setup dashboard: {str(e)}"
+        return f"Failed to setup dashboard: {str(e)}"
 
-    # 3. Launch Browser
+    # Launch Browser
     viz_url = viz_dest.absolute().as_uri()
     try:
         webbrowser.open(viz_url)
         logger.info(f"Browser opened to {viz_url}")
-        return f"✨ Nebula Visualization launched! Found {len(export_data)} memories.\nOpening: {viz_dest}"
+        return f"Nebula Visualization launched! Found {len(export_data)} memories.\nOpening: {viz_dest}"
     except Exception as e:
         logger.error(f"Failed to open browser: {e}")
-        return f"✓ Data updated. Please open this file manually to see the nebula:\n{viz_dest}"
+        return f"Data updated. Please open this file manually to see the nebula:\n{viz_dest}"
 
 
 # ============================================================
-# Journal Tools
+# MCP Tools — Journal
 # ============================================================
+
+def _generate_slug(title: str, max_length: int = 50) -> str:
+    """Generate a filesystem-safe slug from a title."""
+    slug = title.lower()
+    slug = re.sub(r'[<>:"/\\|?*]', '', slug)
+    slug = re.sub(r'[^a-z0-9]+', '-', slug)
+    slug = slug.strip('-')
+    if len(slug) > max_length:
+        slug = slug[:max_length].rstrip('-')
+    return slug or 'untitled'
+
 
 @mcp.tool()
 def write_journal(
@@ -656,11 +820,11 @@ def write_journal(
     importance: int = 5,
     summary: str = ""
 ) -> str:
-    """Write a new journal entry. Creates a markdown file with YAML frontmatter
+    """Write a new journal entry. Creates a database record
     and a companion memory for semantic search.
 
     Args:
-        title: Entry title (used for filename and display)
+        title: Entry title
         content: Full journal entry text (markdown)
         author: Author name (e.g. "Sunshine", "Valentine", "Newbie")
         tags: Comma-separated tags (e.g. "relationship,milestone")
@@ -669,12 +833,18 @@ def write_journal(
     """
     logger.info(f"Writing journal entry: {title}")
 
-    _ensure_journal_dirs()
     importance = max(1, min(10, importance))
-
     date_str = datetime.now().strftime("%Y-%m-%d")
     slug = _generate_slug(title)
-    entry_path = _resolve_entry_path(date_str, slug)
+    entry_id = f"{date_str}_{slug}"
+
+    # Check for collision and add counter if needed
+    existing = db.get_journal_entry(entry_id)
+    if existing:
+        counter = 2
+        while db.get_journal_entry(f"{entry_id}-{counter}"):
+            counter += 1
+        entry_id = f"{entry_id}-{counter}"
 
     tag_list = [t.strip() for t in tags.split(',') if t.strip()]
 
@@ -686,60 +856,40 @@ def write_journal(
     else:
         summary_text = summary.strip()
 
-    # Build entry file
-    metadata = {
-        "date": date_str,
-        "author": author,
-        "title": title,
-        "summary": summary_text,
-        "tags": tag_list,
-        "importance": importance,
-        "pinned": False
-    }
-    frontmatter = _build_frontmatter(metadata)
-    entry_content = f"{frontmatter}\n\n{content}\n"
+    # Save journal entry to DB
+    db.save_journal_entry(
+        entry_id=entry_id,
+        author=author,
+        title=title,
+        entry_type="reflection",
+        content=content,
+        why_it_mattered=summary_text,
+        tags=tag_list,
+        importance=importance,
+        date=date_str
+    )
+    logger.info(f"Journal entry saved: {entry_id}")
 
-    try:
-        with open(entry_path, 'w', encoding='utf-8') as f:
-            f.write(entry_content)
-        logger.info(f"Journal entry saved: {entry_path.name}")
-    except IOError as e:
-        logger.error(f"Failed to write journal entry: {e}")
-        return f"Failed to write journal entry: {str(e)}"
+    # Create companion memory for semantic search
+    memory_text = f"{summary_text} | Journal: {entry_id}"
+    embedding = model.encode(content)
+    embedding_blob = _embedding_to_blob(embedding)
 
-    # Create companion memory (embed full content for rich search)
-    memory_id = get_next_memory_id()
-    relative_path = f"journal/entries/{entry_path.name}"
-    memory_text = f"{summary_text} | File: {relative_path}"
-
-    try:
-        embedding = model.encode(content)
-        companion = {
-            "id": f"{memory_id:03d}",
-            "text": memory_text,
-            "date": date_str,
-            "tags": tag_list,
-            "type": "journal",
-            "importance": importance,
-            "retrieval_count": 0,
-            "last_accessed": None,
-            "embedding": embedding.tolist()
-        }
-        memory_path = MEMORIES_DIR / f"memory_{memory_id:03d}.json"
-        with open(memory_path, 'w', encoding='utf-8') as f:
-            json.dump(companion, f, indent=2)
-        logger.info(f"Companion memory #{memory_id} created for journal entry")
-    except Exception as e:
-        logger.error(f"Failed to create companion memory: {e}")
-        return f"Journal entry saved to {entry_path.name}, but companion memory failed: {str(e)}"
-
-    # Regenerate latest.md
-    _regenerate_latest_md()
+    memory_id = db.save_memory(
+        text=memory_text,
+        tags=tag_list,
+        type="journal",
+        importance=importance,
+        embedding=embedding_blob,
+        journal_file=entry_id,
+        date=date_str
+    )
+    logger.info(f"Companion memory #{memory_id} created for journal entry")
 
     return (
         f"Journal entry saved!\n"
-        f"  Entry: {relative_path}\n"
-        f"  Memory: #{memory_id:03d}\n"
+        f"  Entry: {entry_id}\n"
+        f"  Memory: #{memory_id}\n"
         f"  Author: {author}\n"
         f"  Tags: {', '.join(tag_list) if tag_list else 'none'}\n"
         f"  Importance: {importance}/10"
@@ -747,25 +897,40 @@ def write_journal(
 
 
 @mcp.tool()
-def read_journal_latest(count: int = None) -> str:
+def read_journal_latest(count: int = 3) -> str:
     """Read the latest journal entries for orientation. Returns pinned entries
     first, then most recent.
 
     Args:
-        count: Number of entries to include (default from config, typically 3)
+        count: Number of entries to include (default 3)
     """
     logger.info(f"Reading journal latest (count={count})")
 
-    # Fast path: read pre-generated file if no override requested
-    if count is None and JOURNAL_LATEST_PATH.exists():
-        try:
-            with open(JOURNAL_LATEST_PATH, 'r', encoding='utf-8') as f:
-                return f.read()
-        except IOError as e:
-            logger.error(f"Failed to read latest.md: {e}")
+    pinned, unpinned = db.get_journal_latest(count=count, max_pins=2)
 
-    # Dynamic composition (count override or file doesn't exist)
-    return _compose_latest(count)
+    if not pinned and not unpinned:
+        return "No journal entries yet. Use write_journal to create your first entry."
+
+    sections = ["# Journal -- Latest Entries\n"]
+
+    if pinned:
+        sections.append("## Pinned\n")
+        for e in pinned:
+            sections.append(f"### {e.get('title', 'Untitled')} ({e.get('date', 'unknown')})")
+            sections.append(f"*By {e.get('author', 'Unknown')}*\n")
+            sections.append(e.get('content', ''))
+            sections.append("\n---\n")
+
+    if unpinned:
+        if pinned:
+            sections.append("## Recent\n")
+        for e in unpinned:
+            sections.append(f"### {e.get('title', 'Untitled')} ({e.get('date', 'unknown')})")
+            sections.append(f"*By {e.get('author', 'Unknown')}*\n")
+            sections.append(e.get('content', ''))
+            sections.append("\n---\n")
+
+    return '\n'.join(sections)
 
 
 @mcp.tool()
@@ -780,33 +945,35 @@ def search_journal(query: str, top_k: int = 3) -> str:
 
     top_k = max(1, min(10, top_k))
 
-    memories = load_all_memories()
-    journal_memories = [m for m in memories if m.get('type') == 'journal']
+    journal_memories = db.get_all_memories(type_filter="journal")
+    journal_with_emb = [m for m in journal_memories if m.get('embedding')]
 
-    if not journal_memories:
+    if not journal_with_emb:
         return "No journal entries found. Use write_journal to create your first entry."
 
-    results = _search_memories_core(query, journal_memories, top_k)
+    results = _search_memories_core(query, journal_with_emb, top_k)
 
-    output_lines = [f"Found {len(journal_memories)} journal entries, showing top {len(results)}:\n"]
+    output_lines = [f"Found {len(journal_with_emb)} journal entries, showing top {len(results)}:\n"]
 
     for i, (idx, base_sim, final_score, total_boost) in enumerate(results, 1):
-        mem = journal_memories[idx]
+        mem = journal_with_emb[idx]
         boost_str = f" (+{total_boost:.3f} boost)" if total_boost > 0 else ""
 
-        update_memory_retrieval(mem)
+        db.update_retrieval(mem['id'])
 
-        # Extract summary and filepath from text
+        # Extract summary and entry id from text
         text = mem.get('text', '')
-        if ' | File: ' in text:
-            display_summary, filepath = text.rsplit(' | File: ', 1)
+        if ' | Journal: ' in text:
+            display_summary, entry_ref = text.rsplit(' | Journal: ', 1)
+        elif ' | File: ' in text:
+            display_summary, entry_ref = text.rsplit(' | File: ', 1)
         else:
             display_summary = text
-            filepath = 'unknown'
+            entry_ref = 'unknown'
 
         output_lines.append(f"{i}. [{mem['id']}] Similarity: {final_score:.3f}{boost_str}")
         output_lines.append(f"   {display_summary}")
-        output_lines.append(f"   File: {filepath}")
+        output_lines.append(f"   Entry: {entry_ref}")
         output_lines.append(f"   Tags: {', '.join(mem['tags']) if mem['tags'] else 'none'}")
         output_lines.append(
             f"   Importance: {mem['importance']}/10, Retrieved: {mem.get('retrieval_count', 0)} times\n")
@@ -824,110 +991,66 @@ def list_journal_entries(limit: int = 10) -> str:
     logger.info(f"Listing journal entries (limit: {limit})")
 
     limit = max(1, min(50, limit))
-
-    if not JOURNAL_ENTRIES_DIR.exists():
-        return "No journal entries yet. Use write_journal to create your first entry."
-
-    entries = []
-    for filepath in JOURNAL_ENTRIES_DIR.glob("*.md"):
-        try:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                raw = f.read()
-            metadata, _ = _parse_frontmatter(raw)
-            metadata['_filename'] = filepath.name
-            entries.append(metadata)
-        except IOError as e:
-            logger.error(f"Failed to read {filepath}: {e}")
+    entries = db.get_journal_entries(limit=limit)
 
     if not entries:
         return "No journal entries yet. Use write_journal to create your first entry."
 
-    entries.sort(key=lambda e: str(e.get('date', '')), reverse=True)
+    total_row = db.conn.execute("SELECT COUNT(*) FROM journal_entries").fetchone()
+    total = total_row[0]
 
-    total = len(entries)
-    shown = entries[:limit]
-
-    output_lines = [f"Journal: {total} entries, showing {len(shown)} most recent:\n"]
-    output_lines.append(f"{'Date':<12} {'Author':<14} {'Title':<30} {'Imp':>3} {'Pin':>3}  Filename")
+    output_lines = [f"Journal: {total} entries, showing {len(entries)} most recent:\n"]
+    output_lines.append(f"{'Date':<12} {'Author':<14} {'Title':<30} {'Imp':>3} {'Pin':>3}  ID")
     output_lines.append(f"{'-'*12} {'-'*14} {'-'*30} {'-'*3} {'-'*3}  {'-'*20}")
 
-    for e in shown:
+    for e in entries:
         date = str(e.get('date', '?'))[:10]
         author = str(e.get('author', '?'))[:14]
         title = str(e.get('title', 'Untitled'))[:30]
         imp = str(e.get('importance', '?'))
-        pin = 'Yes' if e.get('pinned', False) else ' No'
-        fname = e.get('_filename', '?')
-        output_lines.append(f"{date:<12} {author:<14} {title:<30} {imp:>3} {pin:>3}  {fname}")
+        pin = 'Yes' if e.get('pinned') else ' No'
+        eid = e.get('id', '?')
+        output_lines.append(f"{date:<12} {author:<14} {title:<30} {imp:>3} {pin:>3}  {eid}")
 
     return '\n'.join(output_lines)
 
 
 @mcp.tool()
-def pin_journal_entry(filename: str, pinned: bool = True) -> str:
-    """Pin or unpin a journal entry. Pinned entries always appear in latest.md.
+def pin_journal_entry(entry_id: str, pinned: bool = True) -> str:
+    """Pin or unpin a journal entry. Pinned entries always appear in latest view.
 
     Args:
-        filename: Entry filename (e.g. "2026-02-25_doors-opening.md")
+        entry_id: Entry ID (e.g. "2026-02-25_doors-opening")
         pinned: True to pin, False to unpin
     """
-    logger.info(f"{'Pinning' if pinned else 'Unpinning'} journal entry: {filename}")
+    logger.info(f"{'Pinning' if pinned else 'Unpinning'} journal entry: {entry_id}")
 
-    entry_path = JOURNAL_ENTRIES_DIR / filename
-    if not entry_path.exists():
-        return f"Entry not found: {filename}"
-
-    try:
-        with open(entry_path, 'r', encoding='utf-8') as f:
-            raw = f.read()
-    except IOError as e:
-        return f"Failed to read entry: {str(e)}"
-
-    metadata, body = _parse_frontmatter(raw)
+    entry = db.get_journal_entry(entry_id)
+    if not entry:
+        return f"Entry not found: {entry_id}"
 
     if pinned:
-        # Check pin limit
-        config = _load_journal_config()
-        max_pins = config['max_pins']
-        current_pins = []
-        for fp in JOURNAL_ENTRIES_DIR.glob("*.md"):
-            if fp.name == filename:
-                continue
-            try:
-                with open(fp, 'r', encoding='utf-8') as f:
-                    m, _ = _parse_frontmatter(f.read())
-                if m.get('pinned', False):
-                    current_pins.append(f"  - {fp.name}: {m.get('title', 'Untitled')}")
-            except IOError:
-                continue
-
-        if len(current_pins) >= max_pins:
-            pin_list = '\n'.join(current_pins)
+        current_pins = db.count_pinned_journal()
+        max_pins = 2
+        if current_pins >= max_pins:
+            pinned_entries = db.get_pinned_journal()
+            pin_list = '\n'.join(f"  - {p['id']}: {p['title']}" for p in pinned_entries)
             return (
                 f"Cannot pin: already at maximum ({max_pins} pins).\n"
                 f"Currently pinned:\n{pin_list}\n\n"
-                f"Unpin one first with pin_journal_entry(filename, pinned=False)."
+                f"Unpin one first with pin_journal_entry(entry_id, pinned=False)."
             )
 
-    metadata['pinned'] = pinned
-    new_content = _build_frontmatter(metadata) + "\n\n" + body + "\n"
-
-    try:
-        with open(entry_path, 'w', encoding='utf-8') as f:
-            f.write(new_content)
-    except IOError as e:
-        return f"Failed to update entry: {str(e)}"
-
-    _regenerate_latest_md()
+    db.update_journal_pin(entry_id, pinned)
 
     action = "Pinned" if pinned else "Unpinned"
-    return f"{action}: {filename} ({metadata.get('title', 'Untitled')}). latest.md regenerated."
+    return f"{action}: {entry_id} ({entry.get('title', 'Untitled')})."
 
 
 def main():
     """Run the MCP server"""
     logger.info("Starting Claude Memory MCP server...")
-    logger.info(f"Memories will be stored in: {MEMORIES_DIR}")
+    logger.info(f"Memories stored in: {DB_PATH}")
     mcp.run(transport="stdio")
 
 
