@@ -2,6 +2,8 @@
 
 Recent updates:
 
+- 03.07.2026 - **Claude Desktop App HOTFIX** - embedding model now loads
+as a subprocess, stopping the MCP from stalling and crashing.
 - 13.04.2026 - **SQLite Migration** — Memories and journal entries now stored in `shared.db` (SQLite with WAL mode). Added duplicate detection, `delete_memory`, and `add_memory_force` tools. Dropped PyYAML dependency. (v1.2.0)
 - 28.02.2026 - **Journal System** — New tools for structured journaling with semantic search, pinning, and auto-generated orientation summaries (v1.1.0)
 - 02.02.2026 - Improved the search algorithm to better handle backdated memories and boost based on importance and 'tags' inclusion (v1.0.4)
