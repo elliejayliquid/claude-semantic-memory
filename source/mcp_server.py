@@ -63,7 +63,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Initialize FastMCP server
-mcp = FastMCP("claude-memory")
+mcp = FastMCP("semantic-nebula")
 
 # Get memories directory from environment or use default
 raw_dir = os.environ.get('CLAUDE_MEMORIES_DIR')
@@ -1444,7 +1444,7 @@ def pin_journal_entry(entry_id: str, pinned: bool = True) -> str:
 
 def main():
     """Run the MCP server"""
-    logger.info("Starting Claude Memory MCP server...")
+    logger.info("Starting Semantic Nebula MCP server...")
     logger.info(f"Memories stored in: {DB_PATH}")
     if WARM_EMBEDDINGS_ON_STARTUP:
         start_embedding_warmup(delay_seconds=EMBEDDING_WARMUP_DELAY_SECONDS)

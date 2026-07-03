@@ -1,7 +1,13 @@
-# Claude's Semantic Memory System
+# Semantic Nebula
+
+*A persistent semantic memory system for Claude — formerly known as **Claude's Semantic Memory System***
+
+> [!IMPORTANT]
+> **Why the rename?** As of mid-2026, Claude Desktop silently hides MCP tools from any extension with "Claude" in its manifest `name` or `display_name` — most likely an anti-impersonation guard. The extension UI still shows the tools as enabled, but the model never receives them and no error is logged anywhere, which makes it look like the extension is simply broken. The tool names themselves (`add_memory`, `search_memory`, etc.) are unaffected — only the extension's identity matters. So *Claude's Semantic Memory System* became **Semantic Nebula** (v1.3.0), named after its memory visualizer. Same code, same tools, same database — if you're upgrading, just point it at your existing memories directory. If your own extension's tools mysteriously vanished from Claude's roster: check its name first.
 
 Recent updates:
 
+- 03.07.2026 - **Renamed to Semantic Nebula** (v1.3.0) — Claude Desktop hides tools from "Claude"-named extensions; see the notice above. No functional changes.
 - 03.07.2026 - **Claude Desktop App HOTFIX** - embedding model now loads
 as a subprocess, stopping the MCP from stalling and crashing.
 - 13.04.2026 - **SQLite Migration** — Memories and journal entries now stored in `shared.db` (SQLite with WAL mode). Added duplicate detection, `delete_memory`, and `add_memory_force` tools. Dropped PyYAML dependency. (v1.2.0)
@@ -44,7 +50,7 @@ pip install mcp sentence-transformers numpy
 
 ### Install the Extension
 
-1. Download the latest `claude-semantic-memory-X.X.X.mcpb` file from [Releases](https://github.com/elliejayliquid/claude-semantic-memory/tree/main/releases)
+1. Download the latest `semantic-nebula-X.X.X.mcpb` file from [Releases](https://github.com/elliejayliquid/semantic-nebula/tree/main/releases)
 2. Open Claude Desktop
 3. Go to Settings/Extensions
 4. Drag and drop the `.mcpb` file into the Extensions window
@@ -153,8 +159,8 @@ You can change this location at any time in Claude Desktop settings.
 
 ```bash
 # Clone the repository
-git clone https://github.com/elliejayliquid/claude-semantic-memory.git
-cd claude-semantic-memory/source
+git clone https://github.com/elliejayliquid/semantic-nebula.git
+cd semantic-nebula/source
 
 # Install dependencies
 pip install mcp sentence-transformers numpy
@@ -163,12 +169,17 @@ pip install mcp sentence-transformers numpy
 npm install -g @anthropic-ai/mcpb
 
 # Package the extension
-mcpb pack . claude-semantic-memory.mcpb
+mcpb pack . semantic-nebula.mcpb
 ```
 
-This creates `claude-semantic-memory.mcpb` ready for installation!
+This creates `semantic-nebula.mcpb` ready for installation!
 
 ## Troubleshooting
+
+**Tools show as enabled but Claude says it doesn't have them**
+
+- This is exactly what happens when Claude Desktop's name filter hides an extension (see the notice at the top) — make sure you are running **Semantic Nebula**, not an older "Claude's Semantic Memory System" build
+- The same applies to any fork or rename of this project: keep "Claude" out of the manifest `name` and `display_name`
 
 **Extension won't install**
 
