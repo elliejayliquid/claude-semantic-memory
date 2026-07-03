@@ -8,39 +8,50 @@ import importlib.util
 import sqlite3
 import webbrowser
 import shutil
+import threading
+import time
+import tempfile
+import atexit
+import queue
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-def check_and_install_dependencies():
-    """Check for required dependencies and install them if missing"""
-    dependencies = {
-        "mcp": "mcp",
-        "sentence_transformers": "sentence-transformers",
-        "numpy": "numpy"
-    }
-
+def install_missing_dependencies(dependencies: dict[str, str], context: str = "One-Click Install") -> bool:
+    """Install missing Python dependencies. Returns False if installation fails."""
     missing = []
     for import_name, pip_name in dependencies.items():
         if importlib.util.find_spec(import_name) is None:
             missing.append(pip_name)
 
-    if missing:
-        print(f"One-Click Install: Missing dependencies detected: {', '.join(missing)}", file=sys.stderr)
-        print("Installing now... (this may take a minute on the first run)", file=sys.stderr)
-        try:
-            subprocess.check_call([sys.executable, "-m", "pip", "install"] + missing)
-            print("Installation complete! Continuing...", file=sys.stderr)
-        except Exception as e:
-            print(f"Error: Failed to install dependencies: {e}", file=sys.stderr)
-            print("Please try running 'pip install mcp sentence-transformers numpy' manually.", file=sys.stderr)
-            sys.exit(1)
+    if not missing:
+        return True
+
+    print(f"{context}: Missing dependencies detected: {', '.join(missing)}", file=sys.stderr)
+    print("Installing now... (this may take a minute on the first run)", file=sys.stderr)
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install"] + missing)
+        print("Installation complete! Continuing...", file=sys.stderr)
+        return True
+    except Exception as e:
+        print(f"Error: Failed to install dependencies: {e}", file=sys.stderr)
+        return False
+
+
+def check_and_install_dependencies():
+    """Check startup dependencies and install them if missing."""
+    dependencies = {
+        "mcp": "mcp",
+        "numpy": "numpy"
+    }
+    if not install_missing_dependencies(dependencies):
+        print("Please try running 'pip install mcp numpy' manually.", file=sys.stderr)
+        sys.exit(1)
 
 # Run dependency check before anything else
 check_and_install_dependencies()
 
 from mcp.server.fastmcp import FastMCP
-from sentence_transformers import SentenceTransformer
 import numpy as np
 
 # Configure logging to stderr (NOT stdout!)
@@ -61,16 +72,23 @@ if raw_dir:
     MEMORIES_DIR = Path(raw_dir).expanduser().resolve()
 else:
     MEMORIES_DIR = Path.home() / '.claude-memories'
-MODEL_NAME = 'all-MiniLM-L6-v2'
+MODEL_NAME = os.environ.get('CLAUDE_MEMORY_EMBEDDING_MODEL', 'all-MiniLM-L6-v2')
+ALLOW_MODEL_DOWNLOAD = os.environ.get('CLAUDE_MEMORY_ALLOW_MODEL_DOWNLOAD', '').lower() in {'1', 'true', 'yes', 'on'}
+WARM_EMBEDDINGS_ON_STARTUP = os.environ.get('CLAUDE_MEMORY_WARM_EMBEDDINGS_ON_STARTUP', '1').lower() not in {'0', 'false', 'no', 'off'}
+EMBEDDING_WARMUP_DELAY_SECONDS = float(os.environ.get('CLAUDE_MEMORY_EMBEDDING_WARMUP_DELAY_SECONDS', '10'))
+EMBEDDING_WARMUP_TIMEOUT_SECONDS = float(os.environ.get('CLAUDE_MEMORY_EMBEDDING_WARMUP_TIMEOUT_SECONDS', '120'))
+model: Optional[object] = None
+embedding_worker: Optional[object] = None
+model_error: Optional[str] = None
+embedding_status = 'cold'
+embedding_started_at: Optional[float] = None
+embedding_finished_at: Optional[float] = None
+embedding_lock = threading.Lock()
+embedding_warmup_thread: Optional[threading.Thread] = None
 
 # Ensure memories directory exists
 MEMORIES_DIR.mkdir(parents=True, exist_ok=True)
 logger.info(f"Using memories directory: {MEMORIES_DIR}")
-
-# Load embedding model
-logger.info("Loading embedding model...")
-model = SentenceTransformer(MODEL_NAME)
-logger.info("Model loaded successfully!")
 
 
 # ============================================================
@@ -128,7 +146,7 @@ class MemoryDatabase:
     def close(self):
         self.conn.close()
 
-    # ── Memories ─────────────────────────────────────────────
+    # â”€â”€ Memories â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     def save_memory(self, text: str, tags: list[str] | None = None,
                     type: str = "fact", importance: int = 5,
@@ -256,7 +274,7 @@ class MemoryDatabase:
         d["tags"] = json.loads(d["tags"])
         return d
 
-    # ── Journal Entries ──────────────────────────────────────
+    # â”€â”€ Journal Entries â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     def save_journal_entry(self, entry_id: str, author: str,
                            title: Optional[str], entry_type: str,
@@ -371,7 +389,7 @@ class MemoryDatabase:
         return d
 
 
-# ── Open database ────────────────────────────────────────────
+# â”€â”€ Open database â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 DB_PATH = MEMORIES_DIR / "shared.db"
 db = MemoryDatabase(DB_PATH)
@@ -380,6 +398,352 @@ db = MemoryDatabase(DB_PATH)
 # ============================================================
 # Embedding Helpers
 # ============================================================
+
+EMBEDDING_WORKER_SCRIPT = r"""
+import json
+import os
+import sys
+import time
+import tempfile
+from pathlib import Path
+
+
+class StartupLock:
+    def __init__(self, path):
+        self.path = Path(path)
+        self.file = None
+        self._locked = False
+
+    def __enter__(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.file = open(self.path, "a+", encoding="utf-8")
+        self.file.seek(0)
+        self.file.write("0")
+        self.file.flush()
+        self.file.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            while True:
+                try:
+                    msvcrt.locking(self.file.fileno(), msvcrt.LK_NBLCK, 1)
+                    self._locked = True
+                    break
+                except OSError:
+                    time.sleep(0.2)
+        else:
+            import fcntl
+            fcntl.flock(self.file.fileno(), fcntl.LOCK_EX)
+            self._locked = True
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self.file and self._locked:
+            if os.name == "nt":
+                import msvcrt
+                self.file.seek(0)
+                try:
+                    msvcrt.locking(self.file.fileno(), msvcrt.LK_UNLCK, 1)
+                except OSError:
+                    pass
+            else:
+                import fcntl
+                fcntl.flock(self.file.fileno(), fcntl.LOCK_UN)
+        if self.file:
+            self.file.close()
+
+
+def send(payload):
+    print(json.dumps(payload), flush=True)
+
+
+def main():
+    model_name = os.environ.get("CLAUDE_MEMORY_EMBEDDING_MODEL_NAME", "all-MiniLM-L6-v2")
+    allow_download = os.environ.get("CLAUDE_MEMORY_EMBEDDING_ALLOW_DOWNLOAD", "").lower() in {"1", "true", "yes", "on"}
+    warmup_text = os.environ.get("CLAUDE_MEMORY_EMBEDDING_WARMUP_TEXT", "Semantic memory embedding warmup")
+    lock_path = os.environ.get(
+        "CLAUDE_MEMORY_EMBEDDING_WORKER_LOCK",
+        str(Path(tempfile.gettempdir()) / "claude-minilm-embedding-worker.lock"),
+    )
+
+    try:
+        with StartupLock(lock_path):
+            from sentence_transformers import SentenceTransformer
+
+            model = SentenceTransformer(model_name, local_files_only=not allow_download)
+            model.encode(warmup_text, show_progress_bar=False)
+        send({"type": "ready"})
+    except Exception as exc:
+        send({"type": "error", "error": str(exc)})
+        return 1
+
+    for line in sys.stdin:
+        request_id = None
+        try:
+            request = json.loads(line)
+            request_id = request.get("id")
+            command = request.get("command")
+            if command == "shutdown":
+                send({"id": request_id, "ok": True})
+                return 0
+            if command != "encode":
+                raise ValueError(f"Unknown command: {command}")
+            embedding = model.encode(request.get("text", ""), show_progress_bar=False)
+            send({"id": request_id, "embedding": embedding.tolist()})
+        except Exception as exc:
+            send({"id": request_id, "error": str(exc)})
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+"""
+
+
+class EmbeddingWorkerClient:
+    """Small JSON-lines client for an embedding worker subprocess."""
+
+    def __init__(self):
+        self.process: Optional[subprocess.Popen] = None
+        self._messages: queue.Queue[dict] = queue.Queue()
+        self._request_id = 0
+        self._lock = threading.Lock()
+
+    def start(self, timeout_seconds: float):
+        if self.is_running():
+            return
+
+        env = os.environ.copy()
+        env["CLAUDE_MEMORY_EMBEDDING_MODEL_NAME"] = MODEL_NAME
+        env["CLAUDE_MEMORY_EMBEDDING_ALLOW_DOWNLOAD"] = "1" if ALLOW_MODEL_DOWNLOAD else "0"
+        env["CLAUDE_MEMORY_EMBEDDING_WARMUP_TEXT"] = "Semantic memory embedding warmup"
+        env["CLAUDE_MEMORY_EMBEDDING_WORKER_LOCK"] = str(Path(tempfile.gettempdir()) / "claude-minilm-embedding-worker.lock")
+
+        self.process = subprocess.Popen(
+            [sys.executable, "-u", "-c", EMBEDDING_WORKER_SCRIPT],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            bufsize=1,
+            env=env,
+        )
+        threading.Thread(target=self._read_stdout, name="semantic-memory-embedding-worker-stdout", daemon=True).start()
+        threading.Thread(target=self._read_stderr, name="semantic-memory-embedding-worker-stderr", daemon=True).start()
+
+        message = self._next_message(timeout_seconds)
+        if message.get("type") == "ready":
+            return
+        if message.get("type") == "error":
+            raise RuntimeError(message.get("error", "embedding worker failed"))
+        raise RuntimeError(f"Unexpected embedding worker startup response: {message}")
+
+    def is_running(self) -> bool:
+        return self.process is not None and self.process.poll() is None
+
+    def encode(self, text: str, **_: object) -> np.ndarray:
+        with self._lock:
+            if not self.is_running():
+                raise RuntimeError("embedding worker is not running")
+            self._request_id += 1
+            request_id = self._request_id
+            self._send({"id": request_id, "command": "encode", "text": text})
+            while True:
+                message = self._next_message(float(os.environ.get("CLAUDE_MEMORY_EMBEDDING_ENCODE_TIMEOUT_SECONDS", "60")))
+                if message.get("id") != request_id:
+                    logger.debug(f"Ignoring out-of-order embedding worker message: {message}")
+                    continue
+                if "error" in message:
+                    raise RuntimeError(message["error"])
+                return np.array(message["embedding"], dtype=np.float32)
+
+    def shutdown(self):
+        if not self.is_running():
+            return
+        try:
+            self._send({"id": 0, "command": "shutdown"})
+        except Exception:
+            pass
+        try:
+            self.process.terminate()
+        except Exception:
+            pass
+
+    def _send(self, payload: dict):
+        if self.process is None or self.process.stdin is None:
+            raise RuntimeError("embedding worker stdin is unavailable")
+        self.process.stdin.write(json.dumps(payload) + "\n")
+        self.process.stdin.flush()
+
+    def _next_message(self, timeout_seconds: float) -> dict:
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"embedding worker did not respond within {timeout_seconds:.1f}s")
+            if self.process is not None and self.process.poll() is not None and self._messages.empty():
+                raise RuntimeError(f"embedding worker exited with code {self.process.returncode}")
+            try:
+                return self._messages.get(timeout=remaining)
+            except queue.Empty:
+                continue
+
+    def _read_stdout(self):
+        if self.process is None or self.process.stdout is None:
+            return
+        for line in self.process.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                self._messages.put(json.loads(line))
+            except json.JSONDecodeError:
+                logger.info(f"Embedding worker stdout: {line}")
+
+    def _read_stderr(self):
+        if self.process is None or self.process.stderr is None:
+            return
+        for line in self.process.stderr:
+            line = line.strip()
+            if line:
+                logger.info(f"Embedding worker: {line}")
+
+
+def _set_embedding_status(status: str, error: Optional[str] = None):
+    global embedding_status, model_error, embedding_started_at, embedding_finished_at
+    with embedding_lock:
+        embedding_status = status
+        model_error = error
+        if status == "warming":
+            embedding_started_at = time.monotonic()
+            embedding_finished_at = None
+        elif status in {"ready", "failed"}:
+            embedding_finished_at = time.monotonic()
+
+
+def _load_embedding_model_for_warmup():
+    """Start the embedding worker and wait for its ready signal in the background."""
+    global model, model_error, embedding_worker
+
+    if importlib.util.find_spec("sentence_transformers") is None:
+        installed = install_missing_dependencies(
+            {"sentence_transformers": "sentence-transformers"},
+            context="Embedding model dependency"
+        )
+        if not installed:
+            _set_embedding_status("failed", "sentence-transformers is not installed")
+            return
+
+    logger.info(f"Starting embedding worker for model: {MODEL_NAME} (allow_download={ALLOW_MODEL_DOWNLOAD})")
+    worker = None
+    try:
+        worker = EmbeddingWorkerClient()
+        worker.start(timeout_seconds=EMBEDDING_WARMUP_TIMEOUT_SECONDS)
+        with embedding_lock:
+            embedding_worker = worker
+            model = worker
+        _set_embedding_status("ready")
+        logger.info("Embedding worker loaded and warmed successfully!")
+    except Exception as e:
+        if worker is not None:
+            worker.shutdown()
+        _set_embedding_status("failed", str(e))
+        logger.exception(f"Failed to start embedding worker for '{MODEL_NAME}': {e}")
+
+
+def _delayed_embedding_warmup(delay_seconds: float):
+    if delay_seconds > 0:
+        time.sleep(delay_seconds)
+
+    with embedding_lock:
+        if model is not None or embedding_status not in {"cold", "scheduled"}:
+            return
+    _set_embedding_status("warming")
+    _load_embedding_model_for_warmup()
+
+
+def start_embedding_warmup(delay_seconds: float = 0) -> bool:
+    """Start a background embedding warmup if one is not already running."""
+    global embedding_status, embedding_warmup_thread
+
+    with embedding_lock:
+        if model is not None or embedding_status in {"warming", "ready"}:
+            return False
+        if embedding_status == "scheduled":
+            return False
+        embedding_status = "scheduled"
+        embedding_warmup_thread = threading.Thread(
+            target=_delayed_embedding_warmup,
+            args=(delay_seconds,),
+            name="semantic-memory-embedding-warmup",
+            daemon=True,
+        )
+        embedding_warmup_thread.start()
+        return True
+
+
+def get_embedding_model() -> Optional[object]:
+    """Return the embedding worker only when it is already warm."""
+    with embedding_lock:
+        loaded_model = model
+        status = embedding_status
+    if loaded_model is not None and status == "ready":
+        if getattr(loaded_model, "is_running", lambda: True)():
+            return loaded_model
+        _set_embedding_status("failed", "embedding worker exited")
+    return None
+
+
+def shutdown_embedding_worker():
+    with embedding_lock:
+        worker = embedding_worker
+    if worker is not None:
+        worker.shutdown()
+
+
+atexit.register(shutdown_embedding_worker)
+
+
+def embedding_status_message() -> str:
+    with embedding_lock:
+        status = embedding_status
+        error = model_error
+        started = embedding_started_at
+        finished = embedding_finished_at
+
+    if status == "ready":
+        if started and finished:
+            return f"Embedding model is ready. Warmup took {finished - started:.1f}s."
+        return "Embedding model is ready."
+    if status == "failed":
+        detail = f" Last load error: {error}" if error else ""
+        return f"Embedding model failed to load.{detail}"
+    if status == "warming":
+        elapsed = time.monotonic() - started if started else 0
+        return f"Embedding model is still warming up ({elapsed:.1f}s elapsed). Try again shortly."
+    if status == "scheduled":
+        return "Embedding model warmup is scheduled and will start shortly."
+    return "Embedding model is cold. Warmup has not started yet."
+
+
+def ensure_embedding_model_ready() -> tuple[Optional[object], Optional[str]]:
+    """Return a ready embedding worker, or start warmup and return a non-blocking status message."""
+    loaded_model = get_embedding_model()
+    if loaded_model is not None:
+        return loaded_model, None
+    with embedding_lock:
+        status = embedding_status
+    if status == "cold":
+        start_embedding_warmup(delay_seconds=0.5)
+    return None, embedding_status_message()
+
+
+def _embedding_unavailable(action: str) -> str:
+    return (
+        f"Cannot {action} yet. {embedding_status_message()} "
+        "Memory listing, context summaries, journal reading, and visualization still work."
+    )
+
 
 def _embedding_to_blob(embedding) -> bytes:
     """Convert a numpy embedding array to bytes for SQLite BLOB storage."""
@@ -397,13 +761,14 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
 
 
 # ============================================================
-# Search Core (unchanged algorithm — matrix multiply + boosts)
+# Search Core (unchanged algorithm â€” matrix multiply + boosts)
 # ============================================================
 
 def _search_memories_core(
     query: str,
     memories: list[dict[str, Any]],
-    top_k: int
+    top_k: int,
+    embedding_model: object
 ) -> list[tuple[int, float, float, float]]:
     """Core search logic: matrix multiplication + vectorized boosting.
 
@@ -411,6 +776,7 @@ def _search_memories_core(
         query: Search query text
         memories: List of memory dicts, each must have 'embedding' (BLOB bytes)
         top_k: Number of results to return
+        embedding_model: Loaded sentence-transformer model
 
     Returns:
         List of (index, base_similarity, final_score, total_boost)
@@ -420,7 +786,7 @@ def _search_memories_core(
         return []
 
     # Stack all embeddings into a matrix and normalize
-    # Embeddings come as BLOBs from SQLite — convert to numpy
+    # Embeddings come as BLOBs from SQLite â€” convert to numpy
     memory_matrix = np.array([
         _blob_to_vec(m['embedding']) for m in memories
     ])
@@ -429,7 +795,7 @@ def _search_memories_core(
     normalized_matrix = memory_matrix / norm
 
     # Encode and normalize query
-    query_embedding = model.encode(query)
+    query_embedding = embedding_model.encode(query, show_progress_bar=False)
     query_norm = np.linalg.norm(query_embedding)
     normalized_query = query_embedding / query_norm if query_norm > 0 else query_embedding
 
@@ -465,7 +831,7 @@ def _search_memories_core(
 
 
 # ============================================================
-# MCP Tools — Memories
+# MCP Tools â€” Memories
 # ============================================================
 
 @mcp.tool()
@@ -491,7 +857,11 @@ def add_memory(
     tag_list = [t.strip() for t in tags.split(',') if t.strip()]
     memory_date = date if date else datetime.now().strftime("%Y-%m-%d")
 
-    embedding = model.encode(text)
+    embedding_model, _ = ensure_embedding_model_ready()
+    if embedding_model is None:
+        return _embedding_unavailable("add memory")
+
+    embedding = embedding_model.encode(text, show_progress_bar=False)
     embedding_blob = _embedding_to_blob(embedding)
 
     # Dedup check: warn if a very similar memory already exists
@@ -553,7 +923,11 @@ def add_memory_force(
     tag_list = [t.strip() for t in tags.split(',') if t.strip()]
     memory_date = date if date else datetime.now().strftime("%Y-%m-%d")
 
-    embedding = model.encode(text)
+    embedding_model, _ = ensure_embedding_model_ready()
+    if embedding_model is None:
+        return _embedding_unavailable("force-add memory")
+
+    embedding = embedding_model.encode(text, show_progress_bar=False)
     embedding_blob = _embedding_to_blob(embedding)
 
     memory_id = db.save_memory(
@@ -595,8 +969,11 @@ def update_memory(
 
     fields = {}
     if text is not None:
+        embedding_model, _ = ensure_embedding_model_ready()
+        if embedding_model is None:
+            return _embedding_unavailable("update memory text")
         fields["text"] = text
-        fields["embedding"] = _embedding_to_blob(model.encode(text))
+        fields["embedding"] = _embedding_to_blob(embedding_model.encode(text, show_progress_bar=False))
     if tags is not None:
         fields["tags"] = [t.strip() for t in tags.split(',') if t.strip()]
     if importance is not None:
@@ -632,6 +1009,12 @@ def delete_memory(memory_id: int) -> str:
 
 
 @mcp.tool()
+def check_embedding_model() -> str:
+    """Check whether semantic memory embeddings are ready."""
+    return embedding_status_message()
+
+
+@mcp.tool()
 def search_memory(
         query: str,
         top_k: int = 3
@@ -647,7 +1030,11 @@ def search_memory(
     if not memories_with_emb:
         return "No memories found in the system yet. Use add_memory to create your first memory!"
 
-    results = _search_memories_core(query, memories_with_emb, top_k)
+    embedding_model, _ = ensure_embedding_model_ready()
+    if embedding_model is None:
+        return _embedding_unavailable("search memories")
+
+    results = _search_memories_core(query, memories_with_emb, top_k, embedding_model)
 
     logger.info(f"Found {len(results)} results")
     output_lines = [f"Found {len(memories_with_emb)} total memories, showing top {len(results)}:\n"]
@@ -797,7 +1184,7 @@ def visualize_memories() -> str:
 
 
 # ============================================================
-# MCP Tools — Journal
+# MCP Tools â€” Journal
 # ============================================================
 
 def _generate_slug(title: str, max_length: int = 50) -> str:
@@ -848,6 +1235,10 @@ def write_journal(
 
     tag_list = [t.strip() for t in tags.split(',') if t.strip()]
 
+    embedding_model, _ = ensure_embedding_model_ready()
+    if embedding_model is None:
+        return _embedding_unavailable("write journal entry")
+
     # Auto-generate summary if not provided
     if not summary.strip():
         summary_text = content[:150].rstrip()
@@ -872,7 +1263,7 @@ def write_journal(
 
     # Create companion memory for semantic search
     memory_text = f"{summary_text} | Journal: {entry_id}"
-    embedding = model.encode(content)
+    embedding = embedding_model.encode(content, show_progress_bar=False)
     embedding_blob = _embedding_to_blob(embedding)
 
     memory_id = db.save_memory(
@@ -951,7 +1342,11 @@ def search_journal(query: str, top_k: int = 3) -> str:
     if not journal_with_emb:
         return "No journal entries found. Use write_journal to create your first entry."
 
-    results = _search_memories_core(query, journal_with_emb, top_k)
+    embedding_model, _ = ensure_embedding_model_ready()
+    if embedding_model is None:
+        return _embedding_unavailable("search journal entries")
+
+    results = _search_memories_core(query, journal_with_emb, top_k, embedding_model)
 
     output_lines = [f"Found {len(journal_with_emb)} journal entries, showing top {len(results)}:\n"]
 
@@ -1051,8 +1446,12 @@ def main():
     """Run the MCP server"""
     logger.info("Starting Claude Memory MCP server...")
     logger.info(f"Memories stored in: {DB_PATH}")
+    if WARM_EMBEDDINGS_ON_STARTUP:
+        start_embedding_warmup(delay_seconds=EMBEDDING_WARMUP_DELAY_SECONDS)
+        logger.info(f"Embedding warmup scheduled in {EMBEDDING_WARMUP_DELAY_SECONDS:.1f}s")
     mcp.run(transport="stdio")
 
 
 if __name__ == "__main__":
     main()
+

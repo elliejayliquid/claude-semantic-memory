@@ -35,6 +35,10 @@
       "description": "Search for semantically similar memories"
     },
     {
+      "name": "check_embedding_model",
+      "description": "Check whether semantic memory embeddings are ready"
+    },
+    {
       "name": "list_memories",
       "description": "List recent memories"
     },

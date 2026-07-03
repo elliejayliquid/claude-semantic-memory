@@ -35,10 +35,10 @@ A persistent semantic memory system for Claude Desktop that uses vector embeddin
 pip install mcp sentence-transformers numpy
 ```
 
-**Note**: On first run, the extension will download the `all-MiniLM-L6-v2` embedding model (~90MB). This happens automatically.
+**Note**: The MCP server starts quickly, then warms the embedding model in a background worker process. Embedding-capable tools (`add_memory`, `search_memory`, `write_journal`, or `search_journal`) will say the model is warming if called before it is ready. Embedding tools use the local cache by default so Hugging Face certificate/network issues cannot stall MCP calls. To pre-warm the cache, run: `python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"`. Set `CLAUDE_MEMORY_ALLOW_MODEL_DOWNLOAD=1` only if you explicitly want the server to contact Hugging Face at runtime. Set `CLAUDE_MEMORY_EMBEDDING_WARMUP_DELAY_SECONDS` to tune the background warmup delay (default: 10). Set `CLAUDE_MEMORY_EMBEDDING_WARMUP_TIMEOUT_SECONDS` to tune how long the server waits for the worker to become ready before reporting failure (default: 120).
 
 > [!TIP]
-> **One-Click Ready**: If you have Python installed but forgot the libraries, the extension will now automatically detect and install missing dependencies (`mcp`, `numpy`, `sentence-transformers`) on its very first run!
+> **One-Click Ready**: If you have Python installed but forgot the libraries, the extension will automatically detect and install startup dependencies (`mcp`, `numpy`) on first run. `sentence-transformers` is installed lazily the first time an embedding-capable tool needs it.
 
 ### Install the Extension
 
@@ -49,12 +49,13 @@ pip install mcp sentence-transformers numpy
 5. Choose a directory where your memories will be stored
 6. Click "Install"
 
-That's it! Claude now has access to thirteen tools:
+That's it! Claude now has access to fourteen tools:
 
 ### Memory Tools
 - `add_memory` - Store new memories with automatic duplicate detection
 - `add_memory_force` - Store a memory bypassing the duplicate check
 - `search_memory` - Find related memories by semantic similarity
+- `check_embedding_model` - Check whether the embedding model is ready
 - `list_memories` - Browse your most recent entries
 - `get_context_summary` - Retrieve a "Smart Context" of recent and key memories
 - `update_memory` - Refine, correct, or expand an existing memory entry
@@ -175,7 +176,8 @@ This creates `claude-semantic-memory.mcpb` ready for installation!
 **Model download fails**
 
 - Check internet connection
-- The model is downloaded from HuggingFace on first run
+- By default, embedding-capable tools load the model from the local cache and do not contact Hugging Face at runtime
+- Use `check_embedding_model` to see whether background warmup is scheduled, warming, ready, or failed
 - Look for logs in Claude Desktop's extension logs
 
 **Memories not persisting**
@@ -244,18 +246,18 @@ Contributions welcome! Please feel free to submit issues or pull requests.
 
 MIT License - see LICENSE file for details
 
-## Credits
-
-Built with love by Lighstromo Studios Ltd., Gemini & Claude
-
 ## Acknowledgments
 
 - [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) by Anthropic
 - [sentence-transformers](https://www.sbert.net/) for semantic embeddings
 - The `all-MiniLM-L6-v2` model for fast, quality embeddings
 
-##
-
-<div class="container", align="center">
-  <a href='https://ko-fi.com/V7V31EO2OL' target='_blank'><img height='36' style='border:0px;height:36px;' src='https://storage.ko-fi.com/cdn/kofi6.png?v=6' border='0' alt='Buy Me a Coffee at ko-fi.com' /></a>
-</div>
+<!-- markdownlint-disable MD033 -->
+<p align="center">
+  Built with love by <b>Lighstromo Studios Ltd., Gemini & Claude</b><br>
+  <br>
+  <a href='https://ko-fi.com/V7V31EO2OL' target='_blank'>
+    <img height='36' src='https://storage.ko-fi.com/cdn/kofi6.png?v=6' alt='Buy Me a Coffee at ko-fi.com' />
+  </a>
+</p>
+<!-- markdownlint-enable MD033 -->
